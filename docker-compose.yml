@@ -1,0 +1,11 @@
+version: '3.8'
+services:
+  yondendirici-bot:
+    build: .
+    container_name: tg-dc-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Veritabanını sunucunun diskine bağlarız ki bot güncellendiğinde kayıtlar silinmesin
+      - ./bot.db:/app/bot.db

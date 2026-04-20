@@ -1,0 +1,17 @@
+# Local secrets and runtime data
+.env
+bot.db
+
+# Build artifacts
+bot
+*.exe
+*.out
+*.test
+
+# Coverage
+coverage.out
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
