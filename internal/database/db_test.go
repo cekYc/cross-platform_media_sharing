@@ -49,3 +49,23 @@ func TestMergeBlockedWords(t *testing.T) {
 		t.Fatalf("mergeBlockedWords append handling failed, got %q", got)
 	}
 }
+
+func TestRemoveBlockedWord(t *testing.T) {
+	existing := sql.NullString{Valid: true, String: "spam,ads,news"}
+
+	updated, removed := removeBlockedWord(existing, "ads")
+	if !removed {
+		t.Fatal("expected removeBlockedWord to remove existing value")
+	}
+	if updated != "spam,news" {
+		t.Fatalf("removeBlockedWord returned %q, want %q", updated, "spam,news")
+	}
+
+	updated, removed = removeBlockedWord(existing, "missing")
+	if removed {
+		t.Fatal("expected removeBlockedWord to return removed=false for missing value")
+	}
+	if updated != "spam,ads,news" {
+		t.Fatalf("removeBlockedWord returned %q, want %q", updated, "spam,ads,news")
+	}
+}

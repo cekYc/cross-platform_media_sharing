@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -15,13 +16,46 @@ import (
 )
 
 const (
-	maxMediaBytes      = 20 * 1024 * 1024
-	queueEnqueueTimout = 2 * time.Second
-	downloadRetries    = 3
-	downloadTimeout    = 20 * time.Second
+	queueEnqueueTimeout = 2 * time.Second
+	downloadRetries     = 3
+	downloadTimeout     = 20 * time.Second
+	fallbackMaxBytes    = 20 * 1024 * 1024
 )
 
-var downloadClient = &http.Client{Timeout: downloadTimeout}
+type mediaPolicy struct {
+	maxBytes        int64
+	allowedPrefixes []string
+	allowedExact    []string
+}
+
+var (
+	downloadClient = &http.Client{Timeout: downloadTimeout}
+	mediaPolicies  = map[string]mediaPolicy{
+		models.MediaTypePhoto: {
+			maxBytes:        12 * 1024 * 1024,
+			allowedPrefixes: []string{"image/"},
+		},
+		models.MediaTypeVideo: {
+			maxBytes:        30 * 1024 * 1024,
+			allowedPrefixes: []string{"video/"},
+		},
+		models.MediaTypeAnimation: {
+			maxBytes:        20 * 1024 * 1024,
+			allowedPrefixes: []string{"video/", "image/"},
+		},
+		models.MediaTypeDocument: {
+			maxBytes:        25 * 1024 * 1024,
+			allowedPrefixes: []string{"image/", "video/", "audio/", "text/"},
+			allowedExact: []string{
+				"application/pdf",
+				"application/json",
+				"application/zip",
+				"application/x-zip-compressed",
+				"application/octet-stream",
+			},
+		},
+	}
+)
 
 func StartProducer(token string, queue chan<- models.MediaEvent) {
 	bot, err := tgbotapi.NewBotAPI(token)
@@ -41,112 +75,434 @@ func StartProducer(token string, queue chan<- models.MediaEvent) {
 		chatStringID := fmt.Sprintf("%d", update.Message.Chat.ID)
 
 		if update.Message.IsCommand() {
-			cmd := strings.ToLower(update.Message.Command())
-			args := strings.TrimSpace(update.Message.CommandArguments())
-
-			switch cmd {
-			case "id", "chatid":
-				reply := fmt.Sprintf("This chat ID is: `%s`\n\nIn Discord, run:\n`!join %s`", chatStringID, chatStringID)
-				msg := tgbotapi.NewMessage(update.Message.Chat.ID, reply)
-				msg.ParseMode = "Markdown"
-				if _, err := bot.Send(msg); err != nil {
-					log.Printf("[WARN] failed to send /id response: %v", err)
-				}
-			case "block":
-				if args == "" {
-					if _, err := bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Usage: /block <word_or_phrase>")); err != nil {
-						log.Printf("[WARN] failed to send /block usage: %v", err)
-					}
-					continue
-				}
-
-				if err := database.AddBlockedWord(chatStringID, args); err != nil {
-					if _, sendErr := bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "❌ This chat is not linked yet. In Discord, run: !join <telegram_chat_id>")); sendErr != nil {
-						log.Printf("[WARN] failed to send /block error: %v", sendErr)
-					}
-				} else {
-					if _, sendErr := bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "✅ Added to block list: '"+args+"'")); sendErr != nil {
-						log.Printf("[WARN] failed to send /block success: %v", sendErr)
-					}
-				}
-			case "help", "start":
-				helpText := "Commands:\n" +
-					"/id - show this Telegram chat ID\n" +
-					"/block <word_or_phrase> - block media captions containing this text"
-				if _, err := bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, helpText)); err != nil {
-					log.Printf("[WARN] failed to send help response: %v", err)
-				}
-			default:
-				if _, err := bot.Send(tgbotapi.NewMessage(update.Message.Chat.ID, "Unknown command. Use /help")); err != nil {
-					log.Printf("[WARN] failed to send unknown command response: %v", err)
-				}
-			}
+			handleCommand(bot, update.Message, chatStringID)
 			continue
 		}
 
-		var fileID string
-		var fileName string
-		var caption = update.Message.Caption
-		var mediaGroupID = update.Message.MediaGroupID
+		fileID, fileName, mediaType, fileSize, declaredContentType := extractMediaMetadata(update.Message)
+		if fileID == "" {
+			continue
+		}
 
-		if len(update.Message.Photo) > 0 {
-			fileID = update.Message.Photo[len(update.Message.Photo)-1].FileID
-			fileName = "image.jpg"
-		} else if update.Message.Video != nil {
-			fileID = update.Message.Video.FileID
-			fileName = update.Message.Video.FileName
-			if fileName == "" {
-				fileName = "video.mp4"
-			}
-		} else if update.Message.Animation != nil {
-			fileID = update.Message.Animation.FileID
-			fileName = update.Message.Animation.FileName
-			if fileName == "" {
-				fileName = "animation.mp4"
-			}
-		} else if update.Message.Document != nil {
-			fileID = update.Message.Document.FileID
-			fileName = update.Message.Document.FileName
-			if fileName == "" {
-				fileName = "document.bin"
+		policy := policyForMediaType(mediaType)
+		if policy.maxBytes > 0 && fileSize > policy.maxBytes {
+			log.Printf("[WARN] media exceeds %s limit (%d > %d): %s", mediaType, fileSize, policy.maxBytes, fileName)
+			continue
+		}
+
+		fileURL, err := bot.GetFileDirectURL(fileID)
+		if err != nil {
+			log.Printf("[WARN] failed to resolve Telegram file URL: %v", err)
+			continue
+		}
+
+		data, err := downloadFile(fileURL, policy.maxBytes)
+		if err != nil {
+			log.Printf("[WARN] file download failed: %v", err)
+			continue
+		}
+
+		detectedContentType := normalizeContentType(http.DetectContentType(data))
+		if !isAllowedContentType(policy, detectedContentType) {
+			if !(detectedContentType == "application/octet-stream" && isAllowedContentType(policy, declaredContentType)) {
+				log.Printf("[WARN] blocked media due to MIME policy (%s): %s", detectedContentType, fileName)
+				continue
 			}
 		}
 
-		if fileID != "" {
-			fileURL, err := bot.GetFileDirectURL(fileID)
-			if err != nil {
-				log.Printf("[WARN] failed to resolve Telegram file URL: %v", err)
-				continue
-			}
+		if declaredContentType != "" && !isAllowedContentType(policy, declaredContentType) {
+			log.Printf("[WARN] blocked media due to declared MIME policy (%s): %s", declaredContentType, fileName)
+			continue
+		}
 
-			data, err := downloadFile(fileURL)
-			if err != nil {
-				log.Printf("[WARN] file download failed: %v", err)
-				continue
-			}
+		event := models.MediaEvent{
+			Data:         data,
+			FileName:     fileName,
+			Caption:      update.Message.Caption,
+			SourceTGID:   chatStringID,
+			MediaGroupID: update.Message.MediaGroupID,
+			MediaType:    mediaType,
+			ContentType:  detectedContentType,
+		}
 
-			event := models.MediaEvent{
-				Data:         data,
-				FileName:     fileName,
-				Caption:      caption,
-				SourceTGID:   chatStringID,
-				MediaGroupID: mediaGroupID,
-			}
-
-			select {
-			case queue <- event:
-			case <-time.After(queueEnqueueTimout):
-				log.Printf("[WARN] queue is full, dropping media: %s", fileName)
-			}
+		select {
+		case queue <- event:
+		case <-time.After(queueEnqueueTimeout):
+			log.Printf("[WARN] queue is full, dropping media: %s", fileName)
 		}
 	}
 }
 
-func downloadFile(url string) ([]byte, error) {
+func handleCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message, chatStringID string) {
+	command := strings.ToLower(message.Command())
+	args := strings.TrimSpace(message.CommandArguments())
+
+	switch command {
+	case "id", "chatid":
+		reply := fmt.Sprintf("This chat ID is: `%s`\n\nIn Discord, run:\n`!join %s`", chatStringID, chatStringID)
+		msg := tgbotapi.NewMessage(message.Chat.ID, reply)
+		msg.ParseMode = "Markdown"
+		sendTelegramMessage(bot, msg)
+	case "status":
+		handleStatusCommand(bot, message.Chat.ID, chatStringID)
+	case "block":
+		handleBlockCommand(bot, message.Chat.ID, chatStringID, args)
+	case "blocklist":
+		handleBlocklistCommand(bot, message.Chat.ID, chatStringID, args)
+	case "unblock":
+		handleUnblockCommand(bot, message.Chat.ID, chatStringID, args)
+	case "clearblocks":
+		handleClearBlocksCommand(bot, message.Chat.ID, chatStringID, args)
+	case "help", "start":
+		helpText := "Commands:\n" +
+			"/id - show this Telegram chat ID\n" +
+			"/status - show linked Discord channels\n" +
+			"/block <word_or_phrase> - add blocked text for all linked channels\n" +
+			"/block <discord_channel_id> <word_or_phrase> - add blocked text for one channel\n" +
+			"/blocklist [discord_channel_id] - show blocked words\n" +
+			"/unblock <word_or_phrase> - remove blocked text from all linked channels\n" +
+			"/unblock <discord_channel_id> <word_or_phrase> - remove from one channel\n" +
+			"/clearblocks [discord_channel_id] - clear blocked words"
+		sendTelegramText(bot, message.Chat.ID, helpText)
+	default:
+		sendTelegramText(bot, message.Chat.ID, "Unknown command. Use /help")
+	}
+}
+
+func handleStatusCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID string) {
+	pairings, err := database.GetPairingsByTelegramChat(tgChatID)
+	if err != nil {
+		sendTelegramText(bot, chatID, "❌ Failed to load link status.")
+		log.Printf("[WARN] failed to load Telegram status: %v", err)
+		return
+	}
+
+	if len(pairings) == 0 {
+		sendTelegramText(bot, chatID, "ℹ️ This Telegram chat is not linked to any Discord channel yet.")
+		return
+	}
+
+	lines := make([]string, 0, len(pairings))
+	for _, pairing := range pairings {
+		lines = append(lines, fmt.Sprintf("- `%s` (blocked words: %d)", pairing.DCChannelID, len(pairing.BlockedWords)))
+	}
+
+	sendTelegramText(bot, chatID, "Linked Discord channels:\n"+strings.Join(lines, "\n"))
+}
+
+func handleBlockCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args string) {
+	pairings, err := database.GetPairingsByTelegramChat(tgChatID)
+	if err != nil {
+		sendTelegramText(bot, chatID, "❌ Failed to load links for /block.")
+		log.Printf("[WARN] failed to load links for /block: %v", err)
+		return
+	}
+	if len(pairings) == 0 {
+		sendTelegramText(bot, chatID, "❌ This chat is not linked yet. In Discord, run: !join <telegram_chat_id>")
+		return
+	}
+
+	targetChannelID, word := resolveOptionalChannelArg(args, pairings)
+	if strings.TrimSpace(word) == "" {
+		sendTelegramText(bot, chatID, "Usage: /block <word_or_phrase> or /block <discord_channel_id> <word_or_phrase>")
+		return
+	}
+
+	if targetChannelID != "" {
+		if err := database.AddBlockedWord(tgChatID, targetChannelID, word); err != nil {
+			sendTelegramText(bot, chatID, "❌ Failed to update block list for this channel.")
+			log.Printf("[WARN] failed to add blocked word for channel %s: %v", targetChannelID, err)
+			return
+		}
+
+		sendTelegramText(bot, chatID, fmt.Sprintf("✅ Added to block list for `%s`: `%s`", targetChannelID, word))
+		return
+	}
+
+	updatedChannels, err := database.AddBlockedWordForAllChannels(tgChatID, word)
+	if err != nil {
+		sendTelegramText(bot, chatID, "❌ Failed to update block list.")
+		log.Printf("[WARN] failed to add blocked word across channels: %v", err)
+		return
+	}
+
+	sendTelegramText(bot, chatID, fmt.Sprintf("✅ Added to block list for %d linked channel(s): `%s`", updatedChannels, word))
+}
+
+func handleBlocklistCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args string) {
+	pairings, err := database.GetPairingsByTelegramChat(tgChatID)
+	if err != nil {
+		sendTelegramText(bot, chatID, "❌ Failed to load block list.")
+		log.Printf("[WARN] failed to load block list: %v", err)
+		return
+	}
+
+	if len(pairings) == 0 {
+		sendTelegramText(bot, chatID, "ℹ️ No linked Discord channels found.")
+		return
+	}
+
+	targetChannelID := strings.TrimSpace(args)
+	if targetChannelID != "" {
+		if strings.Contains(targetChannelID, " ") {
+			sendTelegramText(bot, chatID, "Usage: /blocklist [discord_channel_id]")
+			return
+		}
+
+		words, err := database.GetBlockedWords(tgChatID, targetChannelID)
+		if errors.Is(err, sql.ErrNoRows) {
+			sendTelegramText(bot, chatID, fmt.Sprintf("ℹ️ `%s` is not linked to this Telegram chat.", targetChannelID))
+			return
+		}
+		if err != nil {
+			sendTelegramText(bot, chatID, "❌ Failed to load block list for this channel.")
+			log.Printf("[WARN] failed to load block list for %s: %v", targetChannelID, err)
+			return
+		}
+
+		if len(words) == 0 {
+			sendTelegramText(bot, chatID, fmt.Sprintf("ℹ️ Block list is empty for `%s`.", targetChannelID))
+			return
+		}
+
+		sendTelegramText(bot, chatID, fmt.Sprintf("Block list for `%s`: %s", targetChannelID, strings.Join(words, ", ")))
+		return
+	}
+
+	lines := make([]string, 0, len(pairings))
+	for _, pairing := range pairings {
+		if len(pairing.BlockedWords) == 0 {
+			lines = append(lines, fmt.Sprintf("- `%s`: (empty)", pairing.DCChannelID))
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("- `%s`: %s", pairing.DCChannelID, strings.Join(pairing.BlockedWords, ", ")))
+	}
+
+	sendTelegramText(bot, chatID, "Block list by channel:\n"+strings.Join(lines, "\n"))
+}
+
+func handleUnblockCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args string) {
+	pairings, err := database.GetPairingsByTelegramChat(tgChatID)
+	if err != nil {
+		sendTelegramText(bot, chatID, "❌ Failed to load links for /unblock.")
+		log.Printf("[WARN] failed to load links for /unblock: %v", err)
+		return
+	}
+	if len(pairings) == 0 {
+		sendTelegramText(bot, chatID, "ℹ️ No linked Discord channels found.")
+		return
+	}
+
+	targetChannelID, word := resolveOptionalChannelArg(args, pairings)
+	if strings.TrimSpace(word) == "" {
+		sendTelegramText(bot, chatID, "Usage: /unblock <word_or_phrase> or /unblock <discord_channel_id> <word_or_phrase>")
+		return
+	}
+
+	if targetChannelID != "" {
+		removed, err := database.RemoveBlockedWord(tgChatID, targetChannelID, word)
+		if errors.Is(err, sql.ErrNoRows) {
+			sendTelegramText(bot, chatID, fmt.Sprintf("ℹ️ `%s` is not linked to this Telegram chat.", targetChannelID))
+			return
+		}
+		if err != nil {
+			sendTelegramText(bot, chatID, "❌ Failed to update block list for this channel.")
+			log.Printf("[WARN] failed to remove blocked word for %s: %v", targetChannelID, err)
+			return
+		}
+
+		if !removed {
+			sendTelegramText(bot, chatID, fmt.Sprintf("ℹ️ `%s` is not blocked for `%s`.", word, targetChannelID))
+			return
+		}
+
+		sendTelegramText(bot, chatID, fmt.Sprintf("✅ Removed `%s` from `%s`.", word, targetChannelID))
+		return
+	}
+
+	removedChannels, err := database.RemoveBlockedWordFromAllChannels(tgChatID, word)
+	if err != nil {
+		sendTelegramText(bot, chatID, "❌ Failed to update block list.")
+		log.Printf("[WARN] failed to remove blocked word across channels: %v", err)
+		return
+	}
+
+	if removedChannels == 0 {
+		sendTelegramText(bot, chatID, fmt.Sprintf("ℹ️ `%s` was not found in any linked channel block list.", word))
+		return
+	}
+
+	sendTelegramText(bot, chatID, fmt.Sprintf("✅ Removed `%s` from %d linked channel(s).", word, removedChannels))
+}
+
+func handleClearBlocksCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args string) {
+	pairings, err := database.GetPairingsByTelegramChat(tgChatID)
+	if err != nil {
+		sendTelegramText(bot, chatID, "❌ Failed to load links for /clearblocks.")
+		log.Printf("[WARN] failed to load links for /clearblocks: %v", err)
+		return
+	}
+	if len(pairings) == 0 {
+		sendTelegramText(bot, chatID, "ℹ️ No linked Discord channels found.")
+		return
+	}
+
+	targetChannelID := strings.TrimSpace(args)
+	if targetChannelID != "" {
+		if strings.Contains(targetChannelID, " ") {
+			sendTelegramText(bot, chatID, "Usage: /clearblocks [discord_channel_id]")
+			return
+		}
+
+		if !isLinkedChannel(pairings, targetChannelID) {
+			sendTelegramText(bot, chatID, fmt.Sprintf("ℹ️ `%s` is not linked to this Telegram chat.", targetChannelID))
+			return
+		}
+
+		if err := database.ClearBlockedWords(tgChatID, targetChannelID); err != nil {
+			sendTelegramText(bot, chatID, "❌ Failed to clear block list for this channel.")
+			log.Printf("[WARN] failed to clear blocked words for %s: %v", targetChannelID, err)
+			return
+		}
+
+		sendTelegramText(bot, chatID, fmt.Sprintf("✅ Cleared block list for `%s`.", targetChannelID))
+		return
+	}
+
+	clearedChannels, err := database.ClearBlockedWordsForAllChannels(tgChatID)
+	if err != nil {
+		sendTelegramText(bot, chatID, "❌ Failed to clear block list.")
+		log.Printf("[WARN] failed to clear blocked words across channels: %v", err)
+		return
+	}
+
+	sendTelegramText(bot, chatID, fmt.Sprintf("✅ Cleared block list for %d linked channel(s).", clearedChannels))
+}
+
+func resolveOptionalChannelArg(args string, pairings []database.Pairing) (string, string) {
+	trimmed := strings.TrimSpace(args)
+	if trimmed == "" {
+		return "", ""
+	}
+
+	parts := strings.Fields(trimmed)
+	if len(parts) >= 2 && isLinkedChannel(pairings, parts[0]) {
+		remainder := strings.TrimSpace(strings.TrimPrefix(trimmed, parts[0]))
+		return parts[0], remainder
+	}
+
+	return "", trimmed
+}
+
+func isLinkedChannel(pairings []database.Pairing, dcChannelID string) bool {
+	for _, pairing := range pairings {
+		if pairing.DCChannelID == dcChannelID {
+			return true
+		}
+	}
+
+	return false
+}
+
+func extractMediaMetadata(message *tgbotapi.Message) (string, string, string, int64, string) {
+	if len(message.Photo) > 0 {
+		photo := message.Photo[len(message.Photo)-1]
+		return photo.FileID, "image.jpg", models.MediaTypePhoto, int64(photo.FileSize), "image/jpeg"
+	}
+
+	if message.Video != nil {
+		fileName := message.Video.FileName
+		if fileName == "" {
+			fileName = "video.mp4"
+		}
+
+		return message.Video.FileID, fileName, models.MediaTypeVideo, int64(message.Video.FileSize), normalizeContentType(message.Video.MimeType)
+	}
+
+	if message.Animation != nil {
+		fileName := message.Animation.FileName
+		if fileName == "" {
+			fileName = "animation.mp4"
+		}
+
+		return message.Animation.FileID, fileName, models.MediaTypeAnimation, int64(message.Animation.FileSize), normalizeContentType(message.Animation.MimeType)
+	}
+
+	if message.Document != nil {
+		fileName := message.Document.FileName
+		if fileName == "" {
+			fileName = "document.bin"
+		}
+
+		return message.Document.FileID, fileName, models.MediaTypeDocument, int64(message.Document.FileSize), normalizeContentType(message.Document.MimeType)
+	}
+
+	return "", "", "", 0, ""
+}
+
+func policyForMediaType(mediaType string) mediaPolicy {
+	policy, exists := mediaPolicies[mediaType]
+	if !exists {
+		return mediaPolicy{maxBytes: fallbackMaxBytes}
+	}
+
+	return policy
+}
+
+func normalizeContentType(contentType string) string {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	if contentType == "" {
+		return ""
+	}
+
+	if separator := strings.Index(contentType, ";"); separator >= 0 {
+		return strings.TrimSpace(contentType[:separator])
+	}
+
+	return contentType
+}
+
+func isAllowedContentType(policy mediaPolicy, contentType string) bool {
+	normalized := normalizeContentType(contentType)
+	if normalized == "" {
+		return false
+	}
+
+	for _, exact := range policy.allowedExact {
+		if normalized == normalizeContentType(exact) {
+			return true
+		}
+	}
+
+	for _, prefix := range policy.allowedPrefixes {
+		if strings.HasPrefix(normalized, strings.ToLower(strings.TrimSpace(prefix))) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func sendTelegramText(bot *tgbotapi.BotAPI, chatID int64, text string) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	sendTelegramMessage(bot, msg)
+}
+
+func sendTelegramMessage(bot *tgbotapi.BotAPI, msg tgbotapi.MessageConfig) {
+	if _, err := bot.Send(msg); err != nil {
+		log.Printf("[WARN] failed to send Telegram response: %v", err)
+	}
+}
+
+func downloadFile(url string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = fallbackMaxBytes
+	}
+
 	var lastErr error
 
 	for attempt := 1; attempt <= downloadRetries; attempt++ {
-		data, err := downloadFileOnce(url)
+		data, err := downloadFileOnce(url, maxBytes)
 		if err == nil {
 			return data, nil
 		}
@@ -160,7 +516,7 @@ func downloadFile(url string) ([]byte, error) {
 	return nil, fmt.Errorf("download failed after %d attempts: %w", downloadRetries, lastErr)
 }
 
-func downloadFileOnce(url string) ([]byte, error) {
+func downloadFileOnce(url string, maxBytes int64) ([]byte, error) {
 	resp, err := downloadClient.Get(url)
 	if err != nil {
 		return nil, err
@@ -171,15 +527,15 @@ func downloadFileOnce(url string) ([]byte, error) {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	if resp.ContentLength > maxMediaBytes {
-		return nil, fmt.Errorf("file too large: %d bytes (limit: %d bytes)", resp.ContentLength, maxMediaBytes)
+	if resp.ContentLength > maxBytes {
+		return nil, fmt.Errorf("file too large: %d bytes (limit: %d bytes)", resp.ContentLength, maxBytes)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaBytes+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) > maxMediaBytes {
+	if int64(len(data)) > maxBytes {
 		return nil, errors.New("file exceeds maximum allowed size")
 	}
 

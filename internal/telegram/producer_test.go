@@ -22,7 +22,7 @@ func TestDownloadFileRetriesAndSucceeds(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	data, err := downloadFile(srv.URL)
+	data, err := downloadFile(srv.URL, 1024)
 	if err != nil {
 		t.Fatalf("downloadFile() returned error: %v", err)
 	}
@@ -42,7 +42,26 @@ func TestDownloadFileFailsAfterRetries(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := downloadFile(srv.URL); err == nil {
+	if _, err := downloadFile(srv.URL, 1024); err == nil {
 		t.Fatal("downloadFile() expected an error, got nil")
+	}
+}
+
+func TestIsAllowedContentType(t *testing.T) {
+	policy := mediaPolicy{
+		allowedPrefixes: []string{"image/"},
+		allowedExact:    []string{"application/pdf"},
+	}
+
+	if !isAllowedContentType(policy, "image/jpeg") {
+		t.Fatal("expected image/jpeg to be allowed")
+	}
+
+	if !isAllowedContentType(policy, "application/pdf") {
+		t.Fatal("expected application/pdf to be allowed")
+	}
+
+	if isAllowedContentType(policy, "video/mp4") {
+		t.Fatal("expected video/mp4 to be blocked")
 	}
 }

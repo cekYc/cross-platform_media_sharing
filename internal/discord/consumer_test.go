@@ -1,6 +1,9 @@
 package discord
 
-import "testing"
+import (
+	"testing"
+	"tg-discord-bot/internal/database"
+)
 
 func TestContainsBlockedWord(t *testing.T) {
 	tests := []struct {
@@ -42,5 +45,28 @@ func TestContainsBlockedWord(t *testing.T) {
 				t.Fatalf("containsBlockedWord(%q, %#v) = %v, want %v", tc.caption, tc.blockedList, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseUnblockCommand(t *testing.T) {
+	pairings := []database.Pairing{
+		{TGChatID: "1001"},
+		{TGChatID: "1002"},
+	}
+
+	tgID, word := parseUnblockCommand(pairings, []string{"1002", "ad"})
+	if tgID != "1002" || word != "ad" {
+		t.Fatalf("parseUnblockCommand explicit mode = (%q, %q)", tgID, word)
+	}
+
+	tgID, word = parseUnblockCommand(pairings, []string{"ad"})
+	if tgID != "" || word != "" {
+		t.Fatalf("parseUnblockCommand ambiguous mode = (%q, %q), want empty values", tgID, word)
+	}
+
+	singlePairing := []database.Pairing{{TGChatID: "1009"}}
+	tgID, word = parseUnblockCommand(singlePairing, []string{"promo", "spam"})
+	if tgID != "1009" || word != "promo spam" {
+		t.Fatalf("parseUnblockCommand single pairing mode = (%q, %q)", tgID, word)
 	}
 }
