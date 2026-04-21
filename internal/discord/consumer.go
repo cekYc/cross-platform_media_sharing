@@ -3,7 +3,9 @@ package discord
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -21,13 +23,26 @@ import (
 
 const (
 	defaultDuplicateWindowSeconds = 600
-	albumCollectDelay             = 2 * time.Second
+	defaultQueuePollMilliseconds  = 250
+	defaultProcessingLeaseSeconds = 30
+	defaultMaxDeliveryRetries     = 5
+	defaultRetryBaseSeconds       = 2
+	maxRetryBackoffSeconds        = 300
+
+	albumCollectWindow = 3 * time.Second
+	albumIdleTimeout   = 700 * time.Millisecond
 )
 
 var Session *discordgo.Session
 
+type albumBatch struct {
+	items     []database.QueuedEvent
+	firstSeen time.Time
+	lastSeen  time.Time
+}
+
 var (
-	albumCache = make(map[string][]models.MediaEvent)
+	albumCache = make(map[string]*albumBatch)
 	albumMutex sync.Mutex
 
 	seenMediaHashes = make(map[string]time.Time)
@@ -35,6 +50,11 @@ var (
 
 	adminRoleIDs    = map[string]struct{}{}
 	duplicateWindow = time.Duration(defaultDuplicateWindowSeconds) * time.Second
+
+	queuePollInterval  = time.Duration(defaultQueuePollMilliseconds) * time.Millisecond
+	processingLease    = time.Duration(defaultProcessingLeaseSeconds) * time.Second
+	maxDeliveryRetries = defaultMaxDeliveryRetries
+	retryBaseDelay     = time.Duration(defaultRetryBaseSeconds) * time.Second
 )
 
 func InitBot(token string) {
@@ -46,6 +66,7 @@ func InitBot(token string) {
 
 	adminRoleIDs = parseRoleIDs(os.Getenv("DISCORD_ADMIN_ROLE_IDS"))
 	duplicateWindow = resolveDuplicateWindow()
+	resolveQueueSettings()
 
 	Session.AddHandler(handleCommand)
 
@@ -89,6 +110,10 @@ func handleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		handleUnblockCommand(s, m, parts)
 	case "!clearblocks":
 		handleClearBlocksCommand(s, m, parts)
+	case "!deadletters":
+		handleDeadLettersCommand(s, m, parts)
+	case "!replaydead":
+		handleReplayDeadCommand(s, m, parts)
 	case "!help":
 		handleHelpCommand(s, m.ChannelID)
 	}
@@ -96,7 +121,7 @@ func handleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 func isManagedCommand(command string) bool {
 	switch command {
-	case "!join", "!unlink", "!status", "!help", "!blocklist", "!unblock", "!clearblocks":
+	case "!join", "!unlink", "!status", "!help", "!blocklist", "!unblock", "!clearblocks", "!deadletters", "!replaydead":
 		return true
 	default:
 		return false
@@ -166,6 +191,28 @@ func resolveDuplicateWindow() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func resolveQueueSettings() {
+	queuePollInterval = time.Duration(resolvePositiveIntEnv("QUEUE_POLL_MILLISECONDS", defaultQueuePollMilliseconds)) * time.Millisecond
+	processingLease = time.Duration(resolvePositiveIntEnv("QUEUE_PROCESSING_LEASE_SECONDS", defaultProcessingLeaseSeconds)) * time.Second
+	maxDeliveryRetries = resolvePositiveIntEnv("DELIVERY_MAX_RETRIES", defaultMaxDeliveryRetries)
+	retryBaseDelay = time.Duration(resolvePositiveIntEnv("DELIVERY_RETRY_BASE_SECONDS", defaultRetryBaseSeconds)) * time.Second
+}
+
+func resolvePositiveIntEnv(name string, defaultValue int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return defaultValue
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		log.Printf("[WARN] invalid %s value (%q), using default: %d", name, value, defaultValue)
+		return defaultValue
+	}
+
+	return parsed
+}
+
 func handleHelpCommand(s *discordgo.Session, channelID string) {
 	message := "Commands:\n" +
 		"`!join <telegram_chat_id>` - link this Discord channel to a Telegram chat\n" +
@@ -175,6 +222,8 @@ func handleHelpCommand(s *discordgo.Session, channelID string) {
 		"`!unblock <word_or_phrase>` - remove a blocked word (single-link channels)\n" +
 		"`!unblock <telegram_chat_id> <word_or_phrase>` - remove from a specific link\n" +
 		"`!clearblocks [telegram_chat_id]` - clear blocked words for one link\n" +
+		"`!deadletters [limit]` - show failed deliveries for this channel\n" +
+		"`!replaydead <dead_letter_id>` - replay one dead-letter item\n" +
 		"`!help` - show this help"
 	sendChannelMessage(s, channelID, message)
 }
@@ -369,6 +418,72 @@ func handleClearBlocksCommand(s *discordgo.Session, m *discordgo.MessageCreate, 
 	sendChannelMessage(s, m.ChannelID, fmt.Sprintf("✅ Cleared block list for `%s`.", pairing.TGChatID))
 }
 
+func handleDeadLettersCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts []string) {
+	limit := 5
+	if len(parts) > 2 {
+		sendChannelMessage(s, m.ChannelID, "Usage: `!deadletters [limit]`")
+		return
+	}
+	if len(parts) == 2 {
+		parsed, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil || parsed <= 0 {
+			sendChannelMessage(s, m.ChannelID, "Usage: `!deadletters [limit]` (limit must be a positive number)")
+			return
+		}
+		if parsed > 20 {
+			parsed = 20
+		}
+		limit = parsed
+	}
+
+	items, err := database.ListDeadLettersByChannel(m.ChannelID, limit)
+	if err != nil {
+		sendChannelMessage(s, m.ChannelID, "❌ Failed to load dead-letter items.")
+		log.Printf("[WARN] failed to load dead letters: %v", err)
+		return
+	}
+
+	if len(items) == 0 {
+		sendChannelMessage(s, m.ChannelID, "ℹ️ No dead-letter items for this channel.")
+		return
+	}
+
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		reason := truncateReason(item.FailureReason, 80)
+		lines = append(lines, fmt.Sprintf("- id `%d` | file `%s` | retries `%d` | failed `%s` | reason `%s`", item.ID, item.FileName, item.RetryCount, item.FailedAt.Format(time.RFC3339), reason))
+	}
+
+	sendChannelMessage(s, m.ChannelID, "Dead-letter items for this channel:\n"+strings.Join(lines, "\n"))
+}
+
+func handleReplayDeadCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts []string) {
+	if len(parts) != 2 {
+		sendChannelMessage(s, m.ChannelID, "Usage: `!replaydead <dead_letter_id>`")
+		return
+	}
+
+	deadLetterID, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+	if err != nil || deadLetterID <= 0 {
+		sendChannelMessage(s, m.ChannelID, "Usage: `!replaydead <dead_letter_id>`")
+		return
+	}
+
+	replayed, err := database.ReplayDeadLetter(deadLetterID, m.ChannelID)
+	if err != nil {
+		sendChannelMessage(s, m.ChannelID, "❌ Failed to replay dead-letter item.")
+		log.Printf("[WARN] failed to replay dead letter %d: %v", deadLetterID, err)
+		return
+	}
+
+	if !replayed {
+		sendChannelMessage(s, m.ChannelID, "ℹ️ Dead-letter item not found for this channel.")
+		return
+	}
+
+	sendChannelMessage(s, m.ChannelID, fmt.Sprintf("✅ Requeued dead-letter item `%d`.", deadLetterID))
+}
+
 func parseUnblockCommand(pairings []database.Pairing, args []string) (string, string) {
 	if len(args) == 0 {
 		return "", ""
@@ -427,36 +542,203 @@ func sendChannelMessage(s *discordgo.Session, channelID, message string) {
 	}
 }
 
-func StartConsumer(queue <-chan models.MediaEvent) {
-	for event := range queue {
-		pairings, err := database.GetPairingsByTelegramChat(event.SourceTGID)
+func StartConsumer() {
+	for {
+		now := time.Now()
+		flushReadyAlbums(now)
+
+		queuedEvent, found, err := database.ClaimNextPendingEvent(now, processingLease)
 		if err != nil {
-			log.Printf("[WARN] failed to read pairings for Telegram chat %s: %v", event.SourceTGID, err)
+			log.Printf("[WARN] failed to claim pending event: %v", err)
+			time.Sleep(queuePollInterval)
 			continue
 		}
 
-		if len(pairings) == 0 {
+		if !found {
+			time.Sleep(queuePollInterval)
 			continue
 		}
 
-		for _, pairing := range pairings {
-			if containsBlockedWord(event.Caption, pairing.BlockedWords) {
-				log.Printf("[FILTERED] media blocked by keyword rules for channel %s: %s", pairing.DCChannelID, event.FileName)
-				continue
-			}
+		processQueuedEvent(queuedEvent)
+	}
+}
 
-			if isDuplicateMedia(pairing.DCChannelID, event.Data) {
-				log.Printf("[DUPLICATE] skipped duplicate media for channel %s: %s", pairing.DCChannelID, event.FileName)
-				continue
-			}
+func processQueuedEvent(queuedEvent database.QueuedEvent) {
+	event := queuedEvent.Event
+	if strings.TrimSpace(event.EventID) == "" {
+		log.Printf("[WARN] dropping malformed queued event without event id")
+		return
+	}
 
-			if event.MediaGroupID != "" {
-				handleAlbum(event, pairing.DCChannelID)
-			} else {
-				sendSingle(event, pairing.DCChannelID)
-			}
+	if strings.TrimSpace(event.TargetDCID) == "" {
+		handleDeliveryFailure(queuedEvent, "missing target Discord channel id")
+		return
+	}
+
+	blockedWords, err := database.GetBlockedWords(event.SourceTGID, event.TargetDCID)
+	if errors.Is(err, sql.ErrNoRows) {
+		log.Printf("[INFO] skipping event %s because link no longer exists", event.EventID)
+		ackEvent(event.EventID)
+		return
+	}
+	if err != nil {
+		handleDeliveryFailure(queuedEvent, fmt.Sprintf("failed to read blocked words: %v", err))
+		return
+	}
+
+	if containsBlockedWord(event.Caption, blockedWords) {
+		log.Printf("[FILTERED] event %s blocked by keyword rules", event.EventID)
+		ackEvent(event.EventID)
+		return
+	}
+
+	if isDuplicateMedia(event.TargetDCID, event.Data) {
+		log.Printf("[DUPLICATE] skipped duplicate media for channel %s: %s", event.TargetDCID, event.FileName)
+		ackEvent(event.EventID)
+		return
+	}
+
+	if event.MediaGroupID != "" {
+		bufferAlbumEvent(queuedEvent)
+		return
+	}
+
+	if err := sendSingle(event, event.TargetDCID); err != nil {
+		handleDeliveryFailure(queuedEvent, fmt.Sprintf("discord single send failed: %v", err))
+		return
+	}
+
+	ackEvent(event.EventID)
+}
+
+func bufferAlbumEvent(queuedEvent database.QueuedEvent) {
+	now := time.Now()
+	key := albumCacheKey(queuedEvent.Event.TargetDCID, queuedEvent.Event.MediaGroupID)
+
+	albumMutex.Lock()
+	defer albumMutex.Unlock()
+
+	batch, exists := albumCache[key]
+	if !exists {
+		albumCache[key] = &albumBatch{
+			items:     []database.QueuedEvent{queuedEvent},
+			firstSeen: now,
+			lastSeen:  now,
+		}
+		return
+	}
+
+	batch.items = append(batch.items, queuedEvent)
+	batch.lastSeen = now
+}
+
+func flushReadyAlbums(now time.Time) {
+	readyItems := make([][]database.QueuedEvent, 0)
+
+	albumMutex.Lock()
+	for key, batch := range albumCache {
+		if now.Sub(batch.firstSeen) >= albumCollectWindow || now.Sub(batch.lastSeen) >= albumIdleTimeout {
+			readyItems = append(readyItems, batch.items)
+			delete(albumCache, key)
 		}
 	}
+	albumMutex.Unlock()
+
+	for _, items := range readyItems {
+		processAlbumBatch(items)
+	}
+}
+
+func processAlbumBatch(items []database.QueuedEvent) {
+	if len(items) == 0 {
+		return
+	}
+
+	events := make([]models.MediaEvent, 0, len(items))
+	channelID := items[0].Event.TargetDCID
+	for _, item := range items {
+		events = append(events, item.Event)
+	}
+
+	if err := sendGroupToDiscord(events, channelID); err != nil {
+		for _, item := range items {
+			handleDeliveryFailure(item, fmt.Sprintf("discord album send failed: %v", err))
+		}
+		return
+	}
+
+	for _, item := range items {
+		ackEvent(item.Event.EventID)
+	}
+}
+
+func ackEvent(eventID string) {
+	if err := database.AckPendingEvent(eventID); err != nil {
+		log.Printf("[WARN] failed to ack event %s: %v", eventID, err)
+	}
+}
+
+func handleDeliveryFailure(queuedEvent database.QueuedEvent, reason string) {
+	nextRetry := queuedEvent.RetryCount + 1
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "unknown delivery failure"
+	}
+
+	if nextRetry > maxDeliveryRetries {
+		deadLetterID, err := database.MovePendingEventToDeadLetter(queuedEvent.Event.EventID, reason)
+		if err != nil {
+			log.Printf("[ERROR] failed to move event %s to dead-letter queue: %v", queuedEvent.Event.EventID, err)
+			return
+		}
+
+		log.Printf("[DEAD-LETTER] event %s moved to dead-letter id %d after %d retries: %s", queuedEvent.Event.EventID, deadLetterID, queuedEvent.RetryCount, reason)
+		return
+	}
+
+	delay := computeRetryDelay(nextRetry)
+	nextAttemptAt := time.Now().Add(delay)
+	if err := database.ReschedulePendingEvent(queuedEvent.Event.EventID, nextRetry, nextAttemptAt, reason); err != nil {
+		log.Printf("[ERROR] failed to reschedule event %s: %v", queuedEvent.Event.EventID, err)
+		return
+	}
+
+	log.Printf("[RETRY] event %s scheduled retry %d/%d in %s (%s)", queuedEvent.Event.EventID, nextRetry, maxDeliveryRetries, delay, reason)
+}
+
+func computeRetryDelay(retryNumber int) time.Duration {
+	if retryNumber <= 1 {
+		return retryBaseDelay
+	}
+
+	maxDelay := time.Duration(maxRetryBackoffSeconds) * time.Second
+	delay := retryBaseDelay
+	for i := 1; i < retryNumber; i++ {
+		if delay >= maxDelay/2 {
+			return maxDelay
+		}
+		delay *= 2
+	}
+
+	if delay > maxDelay {
+		return maxDelay
+	}
+
+	return delay
+}
+
+func truncateReason(reason string, limit int) string {
+	clean := strings.TrimSpace(reason)
+	if clean == "" {
+		return "-"
+	}
+	if limit <= 0 || len(clean) <= limit {
+		return clean
+	}
+	if limit <= 3 {
+		return clean[:limit]
+	}
+	return clean[:limit-3] + "..."
 }
 
 func isDuplicateMedia(channelID string, data []byte) bool {
@@ -486,38 +768,13 @@ func isDuplicateMedia(channelID string, data []byte) bool {
 	return false
 }
 
-func handleAlbum(event models.MediaEvent, dcChannelID string) {
-	albumMutex.Lock()
-	defer albumMutex.Unlock()
-
-	cacheKey := albumCacheKey(dcChannelID, event.MediaGroupID)
-
-	if _, exists := albumCache[cacheKey]; !exists {
-		albumCache[cacheKey] = []models.MediaEvent{event}
-
-		go func(key string, channelID string) {
-			time.Sleep(albumCollectDelay)
-
-			albumMutex.Lock()
-			items := albumCache[key]
-			delete(albumCache, key)
-			albumMutex.Unlock()
-
-			sendGroupToDiscord(items, channelID)
-		}(cacheKey, dcChannelID)
-
-	} else {
-		albumCache[cacheKey] = append(albumCache[cacheKey], event)
-	}
-}
-
 func albumCacheKey(dcChannelID, mediaGroupID string) string {
 	return dcChannelID + ":" + mediaGroupID
 }
 
-func sendGroupToDiscord(items []models.MediaEvent, dcChannelID string) {
+func sendGroupToDiscord(items []models.MediaEvent, dcChannelID string) error {
 	if len(items) == 0 {
-		return
+		return nil
 	}
 
 	var files []*discordgo.File
@@ -544,15 +801,15 @@ func sendGroupToDiscord(items []models.MediaEvent, dcChannelID string) {
 		Content: combinedCaption,
 		Files:   files,
 	})
-
 	if err != nil {
-		log.Printf("[ERROR] failed to send media group: %v\n", err)
-	} else {
-		log.Printf("[OK] media group with %d files sent to channel %s\n", len(files), dcChannelID)
+		return err
 	}
+
+	log.Printf("[OK] media group with %d files sent to channel %s", len(files), dcChannelID)
+	return nil
 }
 
-func sendSingle(event models.MediaEvent, dcChannelID string) {
+func sendSingle(event models.MediaEvent, dcChannelID string) error {
 	contentType := event.ContentType
 	if strings.TrimSpace(contentType) == "" {
 		contentType = http.DetectContentType(event.Data)
@@ -568,12 +825,12 @@ func sendSingle(event models.MediaEvent, dcChannelID string) {
 		Content: event.Caption,
 		Files:   []*discordgo.File{file},
 	})
-
 	if err != nil {
-		log.Printf("[ERROR] failed to send media to Discord: %v\n", err)
-	} else {
-		log.Printf("[OK] %s sent to channel %s\n", event.FileName, dcChannelID)
+		return err
 	}
+
+	log.Printf("[OK] %s sent to channel %s", event.FileName, dcChannelID)
+	return nil
 }
 
 func containsBlockedWord(caption string, blockedWords []string) bool {

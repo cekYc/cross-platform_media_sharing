@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func TestDownloadFileRetriesAndSucceeds(t *testing.T) {
@@ -63,5 +65,22 @@ func TestIsAllowedContentType(t *testing.T) {
 
 	if isAllowedContentType(policy, "video/mp4") {
 		t.Fatal("expected video/mp4 to be blocked")
+	}
+}
+
+func TestBuildEventIDDeterministic(t *testing.T) {
+	message := &tgbotapi.Message{}
+	message.Chat = &tgbotapi.Chat{ID: 99}
+	message.MessageID = 321
+
+	a := buildEventID(message, "file-1", "dc-1")
+	b := buildEventID(message, "file-1", "dc-1")
+
+	if a != b {
+		t.Fatalf("buildEventID should be deterministic, got %q and %q", a, b)
+	}
+
+	if a == buildEventID(message, "file-1", "dc-2") {
+		t.Fatal("buildEventID should vary by Discord channel id")
 	}
 }

@@ -4,6 +4,11 @@ import (
 	"database/sql"
 	"reflect"
 	"testing"
+	"time"
+
+	"tg-discord-bot/internal/models"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestNormalizeBlockedWord(t *testing.T) {
@@ -67,5 +72,154 @@ func TestRemoveBlockedWord(t *testing.T) {
 	}
 	if updated != "spam,ads,news" {
 		t.Fatalf("removeBlockedWord returned %q, want %q", updated, "spam,ads,news")
+	}
+}
+
+func TestPersistentQueueEnqueueClaimAckIdempotent(t *testing.T) {
+	setupQueueTestDB(t)
+
+	event := models.MediaEvent{
+		EventID:    "evt-1",
+		SourceTGID: "tg-1",
+		TargetDCID: "dc-1",
+		FileName:   "image.jpg",
+		Data:       []byte("payload"),
+	}
+
+	enqueued, err := EnqueuePendingEvent(event)
+	if err != nil {
+		t.Fatalf("EnqueuePendingEvent() error = %v", err)
+	}
+	if !enqueued {
+		t.Fatal("expected first enqueue to be accepted")
+	}
+
+	enqueued, err = EnqueuePendingEvent(event)
+	if err != nil {
+		t.Fatalf("EnqueuePendingEvent() duplicate error = %v", err)
+	}
+	if enqueued {
+		t.Fatal("expected duplicate enqueue to be ignored")
+	}
+
+	claimed, found, err := ClaimNextPendingEvent(time.Now(), 10*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextPendingEvent() error = %v", err)
+	}
+	if !found {
+		t.Fatal("expected queued event to be claimable")
+	}
+	if claimed.Event.EventID != event.EventID {
+		t.Fatalf("claimed event id = %q, want %q", claimed.Event.EventID, event.EventID)
+	}
+
+	if err := AckPendingEvent(event.EventID); err != nil {
+		t.Fatalf("AckPendingEvent() error = %v", err)
+	}
+
+	enqueued, err = EnqueuePendingEvent(event)
+	if err != nil {
+		t.Fatalf("EnqueuePendingEvent() post-ack duplicate check error = %v", err)
+	}
+	if enqueued {
+		t.Fatal("expected processed event id to remain idempotent and be ignored")
+	}
+}
+
+func TestDeadLetterReplayFlow(t *testing.T) {
+	setupQueueTestDB(t)
+
+	event := models.MediaEvent{
+		EventID:    "evt-dead-1",
+		SourceTGID: "tg-2",
+		TargetDCID: "dc-2",
+		FileName:   "clip.mp4",
+		Data:       []byte("video"),
+	}
+
+	enqueued, err := EnqueuePendingEvent(event)
+	if err != nil || !enqueued {
+		t.Fatalf("EnqueuePendingEvent() = (%v, %v), want (true, nil)", enqueued, err)
+	}
+
+	_, found, err := ClaimNextPendingEvent(time.Now(), 10*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextPendingEvent() error = %v", err)
+	}
+	if !found {
+		t.Fatal("expected queued event to be claimable")
+	}
+
+	if err := ReschedulePendingEvent(event.EventID, 3, time.Now(), "discord timeout"); err != nil {
+		t.Fatalf("ReschedulePendingEvent() error = %v", err)
+	}
+
+	deadLetterID, err := MovePendingEventToDeadLetter(event.EventID, "max retries exceeded")
+	if err != nil {
+		t.Fatalf("MovePendingEventToDeadLetter() error = %v", err)
+	}
+	if deadLetterID <= 0 {
+		t.Fatalf("expected valid dead letter id, got %d", deadLetterID)
+	}
+
+	items, err := ListDeadLettersByChannel(event.TargetDCID, 10)
+	if err != nil {
+		t.Fatalf("ListDeadLettersByChannel() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("dead letter list length = %d, want 1", len(items))
+	}
+
+	replayed, err := ReplayDeadLetter(deadLetterID, event.TargetDCID)
+	if err != nil {
+		t.Fatalf("ReplayDeadLetter() error = %v", err)
+	}
+	if !replayed {
+		t.Fatal("expected dead letter replay to succeed")
+	}
+
+	items, err = ListDeadLettersByChannel(event.TargetDCID, 10)
+	if err != nil {
+		t.Fatalf("ListDeadLettersByChannel() after replay error = %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("dead letter list length after replay = %d, want 0", len(items))
+	}
+
+	claimed, found, err := ClaimNextPendingEvent(time.Now(), 10*time.Second)
+	if err != nil {
+		t.Fatalf("ClaimNextPendingEvent() after replay error = %v", err)
+	}
+	if !found {
+		t.Fatal("expected replayed event to be claimable")
+	}
+	if claimed.Event.EventID != event.EventID {
+		t.Fatalf("replayed claimed event id = %q, want %q", claimed.Event.EventID, event.EventID)
+	}
+}
+
+func setupQueueTestDB(t *testing.T) {
+	t.Helper()
+
+	oldDB := DB
+	t.Cleanup(func() {
+		if DB != nil {
+			_ = DB.Close()
+		}
+		DB = oldDB
+	})
+
+	var err error
+	DB, err = sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+
+	if err := createPairingsTable(); err != nil {
+		t.Fatalf("createPairingsTable() error = %v", err)
+	}
+
+	if err := ensureQueueSchema(); err != nil {
+		t.Fatalf("ensureQueueSchema() error = %v", err)
 	}
 }

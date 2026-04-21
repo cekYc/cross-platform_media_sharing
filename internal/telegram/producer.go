@@ -16,10 +16,9 @@ import (
 )
 
 const (
-	queueEnqueueTimeout = 2 * time.Second
-	downloadRetries     = 3
-	downloadTimeout     = 20 * time.Second
-	fallbackMaxBytes    = 20 * 1024 * 1024
+	downloadRetries  = 3
+	downloadTimeout  = 20 * time.Second
+	fallbackMaxBytes = 20 * 1024 * 1024
 )
 
 type mediaPolicy struct {
@@ -57,7 +56,7 @@ var (
 	}
 )
 
-func StartProducer(token string, queue chan<- models.MediaEvent) {
+func StartProducer(token string) {
 	bot, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		log.Fatalf("failed to initialize Telegram bot: %v", err)
@@ -115,22 +114,44 @@ func StartProducer(token string, queue chan<- models.MediaEvent) {
 			continue
 		}
 
-		event := models.MediaEvent{
-			Data:         data,
-			FileName:     fileName,
-			Caption:      update.Message.Caption,
-			SourceTGID:   chatStringID,
-			MediaGroupID: update.Message.MediaGroupID,
-			MediaType:    mediaType,
-			ContentType:  detectedContentType,
+		pairings, err := database.GetPairingsByTelegramChat(chatStringID)
+		if err != nil {
+			log.Printf("[WARN] failed to load pairings for Telegram chat %s: %v", chatStringID, err)
+			continue
 		}
 
-		select {
-		case queue <- event:
-		case <-time.After(queueEnqueueTimeout):
-			log.Printf("[WARN] queue is full, dropping media: %s", fileName)
+		if len(pairings) == 0 {
+			continue
+		}
+
+		for _, pairing := range pairings {
+			event := models.MediaEvent{
+				EventID:      buildEventID(update.Message, fileID, pairing.DCChannelID),
+				Data:         data,
+				FileName:     fileName,
+				Caption:      update.Message.Caption,
+				SourceTGID:   chatStringID,
+				TargetDCID:   pairing.DCChannelID,
+				MediaGroupID: update.Message.MediaGroupID,
+				MediaType:    mediaType,
+				ContentType:  detectedContentType,
+			}
+
+			enqueued, err := database.EnqueuePendingEvent(event)
+			if err != nil {
+				log.Printf("[WARN] failed to enqueue event %s: %v", event.EventID, err)
+				continue
+			}
+
+			if !enqueued {
+				log.Printf("[DUPLICATE] skipped already-known event: %s", event.EventID)
+			}
 		}
 	}
+}
+
+func buildEventID(message *tgbotapi.Message, fileID, dcChannelID string) string {
+	return fmt.Sprintf("tg:%d:%d:%s:%s", message.Chat.ID, message.MessageID, fileID, dcChannelID)
 }
 
 func handleCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message, chatStringID string) {

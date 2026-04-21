@@ -3,6 +3,7 @@ package discord
 import (
 	"testing"
 	"tg-discord-bot/internal/database"
+	"time"
 )
 
 func TestContainsBlockedWord(t *testing.T) {
@@ -68,5 +69,26 @@ func TestParseUnblockCommand(t *testing.T) {
 	tgID, word = parseUnblockCommand(singlePairing, []string{"promo", "spam"})
 	if tgID != "1009" || word != "promo spam" {
 		t.Fatalf("parseUnblockCommand single pairing mode = (%q, %q)", tgID, word)
+	}
+}
+
+func TestComputeRetryDelay(t *testing.T) {
+	originalBase := retryBaseDelay
+	t.Cleanup(func() {
+		retryBaseDelay = originalBase
+	})
+
+	retryBaseDelay = time.Second
+
+	if delay := computeRetryDelay(1); delay != time.Second {
+		t.Fatalf("computeRetryDelay(1) = %s, want %s", delay, time.Second)
+	}
+
+	if delay := computeRetryDelay(3); delay != 4*time.Second {
+		t.Fatalf("computeRetryDelay(3) = %s, want %s", delay, 4*time.Second)
+	}
+
+	if delay := computeRetryDelay(20); delay != time.Duration(maxRetryBackoffSeconds)*time.Second {
+		t.Fatalf("computeRetryDelay(20) = %s, want %s", delay, time.Duration(maxRetryBackoffSeconds)*time.Second)
 	}
 }

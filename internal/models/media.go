@@ -8,10 +8,12 @@ const (
 )
 
 type MediaEvent struct {
+	EventID      string
 	Data         []byte
 	FileName     string
 	Caption      string
 	SourceTGID   string
+	TargetDCID   string
 	MediaGroupID string
 	MediaType    string
 	ContentType  string

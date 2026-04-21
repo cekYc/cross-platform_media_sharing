@@ -24,22 +24,22 @@ This document collects all feature and product ideas for the project in one plac
 
 ## 2) Reliability and Delivery Guarantees
 
-1. Persistent queue
-- Store queued jobs in SQLite (or Redis) so restarts do not lose messages.
+- [x] 1. Persistent queue
+	- [x] Store queued jobs in SQLite (or Redis) so restarts do not lose messages.
 
-2. Retry policy with backoff
-- Exponential backoff on Discord send failures.
-- Retry caps and clear failure reasons.
+- [x] 2. Retry policy with backoff
+	- [x] Exponential backoff on Discord send failures.
+	- [x] Retry caps and clear failure reasons.
 
-3. Dead-letter queue
-- Move permanently failed events to a dead-letter table.
-- Add commands to inspect and replay failed events.
+- [x] 3. Dead-letter queue
+	- [x] Move permanently failed events to a dead-letter table.
+	- [x] Add commands to inspect and replay failed events.
 
-4. Idempotent event processing
-- Use event IDs to prevent double-send in reconnect scenarios.
+- [x] 4. Idempotent event processing
+	- [x] Use event IDs to prevent double-send in reconnect scenarios.
 
-5. Better album coordination
-- Replace fixed sleep with short collector window + inactivity timer.
+- [x] 5. Better album coordination
+	- [x] Replace fixed sleep with short collector window + inactivity timer.
 
 ## 3) Observability and Operations
 

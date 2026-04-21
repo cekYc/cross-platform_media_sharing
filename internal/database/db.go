@@ -2,10 +2,14 @@ package database
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"strings"
+	"time"
+
+	"tg-discord-bot/internal/models"
 
 	_ "modernc.org/sqlite"
 )
@@ -14,6 +18,22 @@ type Pairing struct {
 	TGChatID     string
 	DCChannelID  string
 	BlockedWords []string
+}
+
+type QueuedEvent struct {
+	Event      models.MediaEvent
+	RetryCount int
+}
+
+type DeadLetter struct {
+	ID            int64
+	EventID       string
+	SourceTGID    string
+	TargetDCID    string
+	FileName      string
+	RetryCount    int
+	FailureReason string
+	FailedAt      time.Time
 }
 
 var DB *sql.DB
@@ -27,6 +47,10 @@ func InitDB() {
 
 	if err := ensurePairingsSchema(); err != nil {
 		log.Fatal("database migration failed:", err)
+	}
+
+	if err := ensureQueueSchema(); err != nil {
+		log.Fatal("queue schema migration failed:", err)
 	}
 }
 
@@ -60,6 +84,48 @@ func ensurePairingsSchema() error {
 
 	if err := ensureIndexExists("idx_pairings_dc_channel_id", "pairings", "dc_channel_id"); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+func ensureQueueSchema() error {
+	queries := []string{
+		`CREATE TABLE IF NOT EXISTS pending_events (
+			event_id TEXT PRIMARY KEY,
+			source_tg_id TEXT NOT NULL,
+			target_dc_channel_id TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			available_at INTEGER NOT NULL,
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT DEFAULT '',
+			created_at INTEGER NOT NULL
+		)`,
+		"CREATE INDEX IF NOT EXISTS idx_pending_events_available_at ON pending_events(available_at)",
+		"CREATE INDEX IF NOT EXISTS idx_pending_events_target_dc_channel_id ON pending_events(target_dc_channel_id)",
+		`CREATE TABLE IF NOT EXISTS processed_events (
+			event_id TEXT PRIMARY KEY,
+			processed_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS dead_letters (
+			dead_letter_id INTEGER PRIMARY KEY AUTOINCREMENT,
+			event_id TEXT NOT NULL,
+			source_tg_id TEXT NOT NULL,
+			target_dc_channel_id TEXT NOT NULL,
+			file_name TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			retry_count INTEGER NOT NULL,
+			failure_reason TEXT NOT NULL,
+			failed_at INTEGER NOT NULL
+		)`,
+		"CREATE INDEX IF NOT EXISTS idx_dead_letters_target_dc_channel_id ON dead_letters(target_dc_channel_id)",
+		"CREATE INDEX IF NOT EXISTS idx_dead_letters_failed_at ON dead_letters(failed_at)",
+	}
+
+	for _, query := range queries {
+		if _, err := DB.Exec(query); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -606,4 +672,423 @@ func removeBlockedWord(existing sql.NullString, word string) (string, bool) {
 	}
 
 	return strings.Join(filteredWords, ","), removed
+}
+
+func EnqueuePendingEvent(event models.MediaEvent) (bool, error) {
+	eventID := strings.TrimSpace(event.EventID)
+	if eventID == "" {
+		return false, errors.New("event id is required")
+	}
+
+	event.EventID = eventID
+	event.SourceTGID = strings.TrimSpace(event.SourceTGID)
+	event.TargetDCID = strings.TrimSpace(event.TargetDCID)
+
+	if event.SourceTGID == "" || event.TargetDCID == "" {
+		return false, errors.New("source telegram id and target discord channel id are required")
+	}
+
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return false, err
+	}
+
+	now := time.Now().Unix()
+
+	tx, err := DB.Begin()
+	if err != nil {
+		return false, err
+	}
+
+	rollback := func() {
+		_ = tx.Rollback()
+	}
+
+	var processedEventID string
+	err = tx.QueryRow("SELECT event_id FROM processed_events WHERE event_id = ?", eventID).Scan(&processedEventID)
+	if err == nil {
+		rollback()
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		rollback()
+		return false, err
+	}
+
+	result, err := tx.Exec(
+		`INSERT INTO pending_events (
+			event_id,
+			source_tg_id,
+			target_dc_channel_id,
+			payload,
+			available_at,
+			retry_count,
+			last_error,
+			created_at
+		) VALUES (?, ?, ?, ?, ?, 0, '', ?) ON CONFLICT(event_id) DO NOTHING`,
+		eventID,
+		event.SourceTGID,
+		event.TargetDCID,
+		string(payload),
+		now,
+		now,
+	)
+	if err != nil {
+		rollback()
+		return false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+
+	return rowsAffected > 0, nil
+}
+
+func ClaimNextPendingEvent(now time.Time, lease time.Duration) (QueuedEvent, bool, error) {
+	if lease <= 0 {
+		lease = 30 * time.Second
+	}
+
+	tx, err := DB.Begin()
+	if err != nil {
+		return QueuedEvent{}, false, err
+	}
+
+	rollback := func() {
+		_ = tx.Rollback()
+	}
+
+	var (
+		eventID    string
+		sourceTGID string
+		targetDCID string
+		payload    string
+		retryCount int
+	)
+
+	err = tx.QueryRow(
+		`SELECT event_id, source_tg_id, target_dc_channel_id, payload, retry_count
+		 FROM pending_events
+		 WHERE available_at <= ?
+		 ORDER BY available_at ASC, created_at ASC
+		 LIMIT 1`,
+		now.Unix(),
+	).Scan(&eventID, &sourceTGID, &targetDCID, &payload, &retryCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		rollback()
+		return QueuedEvent{}, false, nil
+	}
+	if err != nil {
+		rollback()
+		return QueuedEvent{}, false, err
+	}
+
+	leaseUntil := now.Add(lease).Unix()
+	if _, err := tx.Exec("UPDATE pending_events SET available_at = ? WHERE event_id = ?", leaseUntil, eventID); err != nil {
+		rollback()
+		return QueuedEvent{}, false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return QueuedEvent{}, false, err
+	}
+
+	var event models.MediaEvent
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		return QueuedEvent{}, false, err
+	}
+
+	if strings.TrimSpace(event.EventID) == "" {
+		event.EventID = eventID
+	}
+	if strings.TrimSpace(event.SourceTGID) == "" {
+		event.SourceTGID = sourceTGID
+	}
+	if strings.TrimSpace(event.TargetDCID) == "" {
+		event.TargetDCID = targetDCID
+	}
+
+	return QueuedEvent{Event: event, RetryCount: retryCount}, true, nil
+}
+
+func AckPendingEvent(eventID string) error {
+	eventID = strings.TrimSpace(eventID)
+	if eventID == "" {
+		return errors.New("event id is required")
+	}
+
+	tx, err := DB.Begin()
+	if err != nil {
+		return err
+	}
+
+	rollback := func() {
+		_ = tx.Rollback()
+	}
+
+	if _, err := tx.Exec(
+		"INSERT INTO processed_events (event_id, processed_at) VALUES (?, ?) ON CONFLICT(event_id) DO UPDATE SET processed_at = excluded.processed_at",
+		eventID,
+		time.Now().Unix(),
+	); err != nil {
+		rollback()
+		return err
+	}
+
+	if _, err := tx.Exec("DELETE FROM pending_events WHERE event_id = ?", eventID); err != nil {
+		rollback()
+		return err
+	}
+
+	return tx.Commit()
+}
+
+func ReschedulePendingEvent(eventID string, retryCount int, nextAvailableAt time.Time, reason string) error {
+	eventID = strings.TrimSpace(eventID)
+	if eventID == "" {
+		return errors.New("event id is required")
+	}
+
+	_, err := DB.Exec(
+		"UPDATE pending_events SET retry_count = ?, available_at = ?, last_error = ? WHERE event_id = ?",
+		retryCount,
+		nextAvailableAt.Unix(),
+		strings.TrimSpace(reason),
+		eventID,
+	)
+	return err
+}
+
+func MovePendingEventToDeadLetter(eventID, reason string) (int64, error) {
+	eventID = strings.TrimSpace(eventID)
+	if eventID == "" {
+		return 0, errors.New("event id is required")
+	}
+
+	tx, err := DB.Begin()
+	if err != nil {
+		return 0, err
+	}
+
+	rollback := func() {
+		_ = tx.Rollback()
+	}
+
+	var (
+		sourceTGID string
+		targetDCID string
+		payload    string
+		retryCount int
+	)
+
+	err = tx.QueryRow(
+		"SELECT source_tg_id, target_dc_channel_id, payload, retry_count FROM pending_events WHERE event_id = ?",
+		eventID,
+	).Scan(&sourceTGID, &targetDCID, &payload, &retryCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		rollback()
+		return 0, sql.ErrNoRows
+	}
+	if err != nil {
+		rollback()
+		return 0, err
+	}
+
+	var event models.MediaEvent
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		rollback()
+		return 0, err
+	}
+
+	result, err := tx.Exec(
+		`INSERT INTO dead_letters (
+			event_id,
+			source_tg_id,
+			target_dc_channel_id,
+			file_name,
+			payload,
+			retry_count,
+			failure_reason,
+			failed_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		eventID,
+		sourceTGID,
+		targetDCID,
+		event.FileName,
+		payload,
+		retryCount,
+		strings.TrimSpace(reason),
+		time.Now().Unix(),
+	)
+	if err != nil {
+		rollback()
+		return 0, err
+	}
+
+	deadLetterID, err := result.LastInsertId()
+	if err != nil {
+		rollback()
+		return 0, err
+	}
+
+	if _, err := tx.Exec("DELETE FROM pending_events WHERE event_id = ?", eventID); err != nil {
+		rollback()
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+
+	return deadLetterID, nil
+}
+
+func ListDeadLettersByChannel(dcChannelID string, limit int) ([]DeadLetter, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	rows, err := DB.Query(
+		`SELECT dead_letter_id, event_id, source_tg_id, target_dc_channel_id, file_name, retry_count, failure_reason, failed_at
+		 FROM dead_letters
+		 WHERE target_dc_channel_id = ?
+		 ORDER BY failed_at DESC
+		 LIMIT ?`,
+		dcChannelID,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]DeadLetter, 0)
+	for rows.Next() {
+		var (
+			item   DeadLetter
+			failed int64
+		)
+
+		if err := rows.Scan(
+			&item.ID,
+			&item.EventID,
+			&item.SourceTGID,
+			&item.TargetDCID,
+			&item.FileName,
+			&item.RetryCount,
+			&item.FailureReason,
+			&failed,
+		); err != nil {
+			return nil, err
+		}
+
+		item.FailedAt = time.Unix(failed, 0)
+		items = append(items, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return items, nil
+}
+
+func ReplayDeadLetter(deadLetterID int64, dcChannelID string) (bool, error) {
+	tx, err := DB.Begin()
+	if err != nil {
+		return false, err
+	}
+
+	rollback := func() {
+		_ = tx.Rollback()
+	}
+
+	var (
+		eventID    string
+		sourceTGID string
+		targetDCID string
+		payload    string
+	)
+
+	err = tx.QueryRow(
+		"SELECT event_id, source_tg_id, target_dc_channel_id, payload FROM dead_letters WHERE dead_letter_id = ?",
+		deadLetterID,
+	).Scan(&eventID, &sourceTGID, &targetDCID, &payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		rollback()
+		return false, nil
+	}
+	if err != nil {
+		rollback()
+		return false, err
+	}
+
+	if strings.TrimSpace(dcChannelID) != "" && targetDCID != strings.TrimSpace(dcChannelID) {
+		rollback()
+		return false, nil
+	}
+
+	var processedEventID string
+	err = tx.QueryRow("SELECT event_id FROM processed_events WHERE event_id = ?", eventID).Scan(&processedEventID)
+	if err == nil {
+		if _, err := tx.Exec("DELETE FROM dead_letters WHERE dead_letter_id = ?", deadLetterID); err != nil {
+			rollback()
+			return false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		rollback()
+		return false, err
+	}
+
+	now := time.Now().Unix()
+	if _, err := tx.Exec(
+		`INSERT INTO pending_events (
+			event_id,
+			source_tg_id,
+			target_dc_channel_id,
+			payload,
+			available_at,
+			retry_count,
+			last_error,
+			created_at
+		) VALUES (?, ?, ?, ?, ?, 0, 'replayed from dead letter', ?)
+		 ON CONFLICT(event_id) DO UPDATE SET
+			available_at = excluded.available_at,
+			retry_count = 0,
+			last_error = excluded.last_error`,
+		eventID,
+		sourceTGID,
+		targetDCID,
+		payload,
+		now,
+		now,
+	); err != nil {
+		rollback()
+		return false, err
+	}
+
+	if _, err := tx.Exec("DELETE FROM dead_letters WHERE dead_letter_id = ?", deadLetterID); err != nil {
+		rollback()
+		return false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+
+	return true, nil
 }
