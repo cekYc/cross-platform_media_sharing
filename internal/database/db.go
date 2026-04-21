@@ -710,7 +710,7 @@ func EnqueuePendingEvent(event models.MediaEvent) (bool, error) {
 		rollback()
 		return false, nil
 	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, sql.ErrNoRows) {
 		rollback()
 		return false, err
 	}
@@ -1049,7 +1049,7 @@ func ReplayDeadLetter(deadLetterID int64, dcChannelID string) (bool, error) {
 		}
 		return true, nil
 	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if !errors.Is(err, sql.ErrNoRows) {
 		rollback()
 		return false, err
 	}
@@ -1091,4 +1091,24 @@ func ReplayDeadLetter(deadLetterID int64, dcChannelID string) (bool, error) {
 	}
 
 	return true, nil
+}
+
+func GetQueueStats() (int, int, error) {
+	var queueDepth int
+	var retryDepth sql.NullInt64
+
+	err := DB.QueryRow(
+		`SELECT COUNT(*), SUM(CASE WHEN retry_count > 0 THEN 1 ELSE 0 END)
+		 FROM pending_events`,
+	).Scan(&queueDepth, &retryDepth)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	retries := 0
+	if retryDepth.Valid {
+		retries = int(retryDepth.Int64)
+	}
+
+	return queueDepth, retries, nil
 }

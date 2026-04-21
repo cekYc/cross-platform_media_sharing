@@ -5,6 +5,7 @@ import (
 	"os"
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/discord"
+	"tg-discord-bot/internal/observability"
 	"tg-discord-bot/internal/telegram"
 
 	"github.com/joho/godotenv"
@@ -26,6 +27,8 @@ func main() {
 
 	database.InitDB()
 	defer database.DB.Close()
+
+	observability.Start()
 
 	discord.InitBot(dcBotToken)
 	defer discord.Session.Close()

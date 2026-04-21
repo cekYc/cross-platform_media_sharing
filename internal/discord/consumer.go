@@ -16,6 +16,7 @@ import (
 	"sync"
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/models"
+	"tg-discord-bot/internal/observability"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -74,7 +75,7 @@ func InitBot(token string) {
 	if err != nil {
 		log.Fatal("failed to open Discord connection:", err)
 	}
-	log.Println("[+] Discord bot is connected and listening for commands...")
+	observability.Log("info", "discord bot connected and command listener active", map[string]interface{}{})
 }
 
 func handleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -544,12 +545,13 @@ func sendChannelMessage(s *discordgo.Session, channelID, message string) {
 
 func StartConsumer() {
 	for {
+		observability.MarkConsumerHeartbeat()
 		now := time.Now()
 		flushReadyAlbums(now)
 
 		queuedEvent, found, err := database.ClaimNextPendingEvent(now, processingLease)
 		if err != nil {
-			log.Printf("[WARN] failed to claim pending event: %v", err)
+			observability.Log("warn", "failed to claim pending event", map[string]interface{}{"error": err.Error()})
 			time.Sleep(queuePollInterval)
 			continue
 		}
@@ -566,7 +568,7 @@ func StartConsumer() {
 func processQueuedEvent(queuedEvent database.QueuedEvent) {
 	event := queuedEvent.Event
 	if strings.TrimSpace(event.EventID) == "" {
-		log.Printf("[WARN] dropping malformed queued event without event id")
+		observability.Log("warn", "dropping malformed queued event without event id", map[string]interface{}{})
 		return
 	}
 
@@ -577,7 +579,10 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 
 	blockedWords, err := database.GetBlockedWords(event.SourceTGID, event.TargetDCID)
 	if errors.Is(err, sql.ErrNoRows) {
-		log.Printf("[INFO] skipping event %s because link no longer exists", event.EventID)
+		observability.LogEvent("info", "skipping event because link no longer exists", event.EventID, map[string]interface{}{
+			"source_tg_id": event.SourceTGID,
+			"target_dc_id": event.TargetDCID,
+		})
 		ackEvent(event.EventID)
 		return
 	}
@@ -587,13 +592,22 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 	}
 
 	if containsBlockedWord(event.Caption, blockedWords) {
-		log.Printf("[FILTERED] event %s blocked by keyword rules", event.EventID)
+		observability.RegisterEventFiltered()
+		observability.LogEvent("info", "event filtered by keyword rules", event.EventID, map[string]interface{}{
+			"source_tg_id": event.SourceTGID,
+			"target_dc_id": event.TargetDCID,
+			"file_name":    event.FileName,
+		})
 		ackEvent(event.EventID)
 		return
 	}
 
 	if isDuplicateMedia(event.TargetDCID, event.Data) {
-		log.Printf("[DUPLICATE] skipped duplicate media for channel %s: %s", event.TargetDCID, event.FileName)
+		observability.LogEvent("info", "duplicate media skipped", event.EventID, map[string]interface{}{
+			"source_tg_id": event.SourceTGID,
+			"target_dc_id": event.TargetDCID,
+			"file_name":    event.FileName,
+		})
 		ackEvent(event.EventID)
 		return
 	}
@@ -609,6 +623,12 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 	}
 
 	ackEvent(event.EventID)
+	observability.RegisterEventsForwarded(1)
+	observability.LogEvent("info", "event forwarded to discord", event.EventID, map[string]interface{}{
+		"source_tg_id": event.SourceTGID,
+		"target_dc_id": event.TargetDCID,
+		"file_name":    event.FileName,
+	})
 }
 
 func bufferAlbumEvent(queuedEvent database.QueuedEvent) {
@@ -669,16 +689,31 @@ func processAlbumBatch(items []database.QueuedEvent) {
 
 	for _, item := range items {
 		ackEvent(item.Event.EventID)
+		observability.LogEvent("info", "album event forwarded to discord", item.Event.EventID, map[string]interface{}{
+			"source_tg_id": item.Event.SourceTGID,
+			"target_dc_id": item.Event.TargetDCID,
+			"file_name":    item.Event.FileName,
+		})
 	}
+
+	observability.RegisterEventsForwarded(int64(len(items)))
 }
 
 func ackEvent(eventID string) {
 	if err := database.AckPendingEvent(eventID); err != nil {
-		log.Printf("[WARN] failed to ack event %s: %v", eventID, err)
+		observability.LogEvent("warn", "failed to ack event", eventID, map[string]interface{}{"error": err.Error()})
 	}
 }
 
 func handleDeliveryFailure(queuedEvent database.QueuedEvent, reason string) {
+	observability.RegisterDeliveryFailure(reason)
+	observability.LogEvent("warn", "delivery failure recorded", queuedEvent.Event.EventID, map[string]interface{}{
+		"source_tg_id": queuedEvent.Event.SourceTGID,
+		"target_dc_id": queuedEvent.Event.TargetDCID,
+		"file_name":    queuedEvent.Event.FileName,
+		"reason":       reason,
+	})
+
 	nextRetry := queuedEvent.RetryCount + 1
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
@@ -688,22 +723,37 @@ func handleDeliveryFailure(queuedEvent database.QueuedEvent, reason string) {
 	if nextRetry > maxDeliveryRetries {
 		deadLetterID, err := database.MovePendingEventToDeadLetter(queuedEvent.Event.EventID, reason)
 		if err != nil {
-			log.Printf("[ERROR] failed to move event %s to dead-letter queue: %v", queuedEvent.Event.EventID, err)
+			observability.LogEvent("error", "failed to move event to dead-letter queue", queuedEvent.Event.EventID, map[string]interface{}{
+				"error": err.Error(),
+			})
 			return
 		}
 
-		log.Printf("[DEAD-LETTER] event %s moved to dead-letter id %d after %d retries: %s", queuedEvent.Event.EventID, deadLetterID, queuedEvent.RetryCount, reason)
+		observability.RegisterDeadLetterMoved()
+		observability.LogEvent("warn", "event moved to dead-letter queue", queuedEvent.Event.EventID, map[string]interface{}{
+			"dead_letter_id": deadLetterID,
+			"retry_count":    queuedEvent.RetryCount,
+			"reason":         reason,
+		})
 		return
 	}
 
 	delay := computeRetryDelay(nextRetry)
 	nextAttemptAt := time.Now().Add(delay)
 	if err := database.ReschedulePendingEvent(queuedEvent.Event.EventID, nextRetry, nextAttemptAt, reason); err != nil {
-		log.Printf("[ERROR] failed to reschedule event %s: %v", queuedEvent.Event.EventID, err)
+		observability.LogEvent("error", "failed to reschedule event", queuedEvent.Event.EventID, map[string]interface{}{
+			"error": err.Error(),
+		})
 		return
 	}
 
-	log.Printf("[RETRY] event %s scheduled retry %d/%d in %s (%s)", queuedEvent.Event.EventID, nextRetry, maxDeliveryRetries, delay, reason)
+	observability.RegisterRetryScheduled()
+	observability.LogEvent("info", "retry scheduled for event", queuedEvent.Event.EventID, map[string]interface{}{
+		"next_retry":  nextRetry,
+		"max_retries": maxDeliveryRetries,
+		"delay":       delay.String(),
+		"reason":      reason,
+	})
 }
 
 func computeRetryDelay(retryNumber int) time.Duration {
@@ -804,8 +854,6 @@ func sendGroupToDiscord(items []models.MediaEvent, dcChannelID string) error {
 	if err != nil {
 		return err
 	}
-
-	log.Printf("[OK] media group with %d files sent to channel %s", len(files), dcChannelID)
 	return nil
 }
 
@@ -828,8 +876,6 @@ func sendSingle(event models.MediaEvent, dcChannelID string) error {
 	if err != nil {
 		return err
 	}
-
-	log.Printf("[OK] %s sent to channel %s", event.FileName, dcChannelID)
 	return nil
 }
 

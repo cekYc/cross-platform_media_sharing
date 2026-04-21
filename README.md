@@ -13,6 +13,10 @@ A Go bot that forwards media from Telegram chats to mapped Discord channels.
 - Album batching with collector window + inactivity timeout
 - Duplicate media suppression window per target channel
 - Safer Telegram media handling with MIME allowlists and size limits
+- Health and readiness endpoints (`/healthz`, `/readyz`)
+- Prometheus-style metrics endpoint (`/metrics`)
+- Structured JSON logs with per-event correlation IDs
+- Built-in operational alerts for failure rate, queue pressure, and reconnect streaks
 
 ## Commands
 
@@ -55,6 +59,15 @@ Optional:
 - `QUEUE_PROCESSING_LEASE_SECONDS` (default: `30`)
 - `DELIVERY_MAX_RETRIES` (default: `5`)
 - `DELIVERY_RETRY_BASE_SECONDS` (default: `2`)
+- `OBSERVABILITY_HTTP_ENABLED` (default: `true`)
+- `OBSERVABILITY_HTTP_ADDR` (default: `:8081`)
+- `READY_CONSUMER_STALE_SECONDS` (default: `30`)
+- `ALERT_EVALUATION_INTERVAL_SECONDS` (default: `30`)
+- `ALERT_FAILURE_RATE_THRESHOLD` (default: `0.25`)
+- `ALERT_FAILURE_MIN_SAMPLE_SIZE` (default: `10`)
+- `ALERT_QUEUE_DEPTH_THRESHOLD` (default: `500`)
+- `ALERT_RETRY_DEPTH_THRESHOLD` (default: `100`)
+- `ALERT_RECONNECT_STREAK_THRESHOLD` (default: `5`)
 
 Notes:
 
@@ -67,6 +80,12 @@ Notes:
 go test ./...
 go run ./cmd/main.go
 ```
+
+Observability endpoints (default bind `:8081`):
+
+- `GET /healthz`
+- `GET /readyz`
+- `GET /metrics`
 
 ## Run With Docker
 

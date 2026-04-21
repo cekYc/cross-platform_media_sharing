@@ -43,21 +43,21 @@ This document collects all feature and product ideas for the project in one plac
 
 ## 3) Observability and Operations
 
-1. Health endpoints
-- /healthz, /readyz
+- [x] 1. Health endpoints
+	- [x] /healthz, /readyz
 
-2. Metrics
-- Prometheus counters: received events, forwarded events, filtered events, failed events.
-- Gauges: queue depth, retry depth.
+- [x] 2. Metrics
+	- [x] Prometheus counters: received events, forwarded events, filtered events, failed events.
+	- [x] Gauges: queue depth, retry depth.
 
-3. Structured logging
-- JSON logs with correlation ID per event.
+- [x] 3. Structured logging
+	- [x] JSON logs with correlation ID per event.
 
-4. Alerting
-- Alert on high failure rate, high queue usage, or prolonged reconnect loops.
+- [x] 4. Alerting
+	- [x] Alert on high failure rate, high queue usage, or prolonged reconnect loops.
 
-5. Runtime config controls
-- Adjustable limits/timeouts via env vars without code changes.
+- [x] 5. Runtime config controls
+	- [x] Adjustable limits/timeouts via env vars without code changes.
 
 ## 4) Moderation and Rule Engine
 

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/models"
+	"tg-discord-bot/internal/observability"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -62,6 +63,8 @@ func StartProducer(token string) {
 		log.Fatalf("failed to initialize Telegram bot: %v", err)
 	}
 
+	observability.Log("info", "telegram producer initialized", map[string]interface{}{})
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 	updates := bot.GetUpdatesChan(u)
@@ -85,38 +88,52 @@ func StartProducer(token string) {
 
 		policy := policyForMediaType(mediaType)
 		if policy.maxBytes > 0 && fileSize > policy.maxBytes {
-			log.Printf("[WARN] media exceeds %s limit (%d > %d): %s", mediaType, fileSize, policy.maxBytes, fileName)
+			observability.Log("warn", "media exceeds configured size limit", map[string]interface{}{
+				"media_type": mediaType,
+				"file_name":  fileName,
+				"file_size":  fileSize,
+				"max_size":   policy.maxBytes,
+			})
 			continue
 		}
 
 		fileURL, err := bot.GetFileDirectURL(fileID)
 		if err != nil {
-			log.Printf("[WARN] failed to resolve Telegram file URL: %v", err)
+			observability.Log("warn", "failed to resolve Telegram file URL", map[string]interface{}{"error": err.Error()})
 			continue
 		}
 
 		data, err := downloadFile(fileURL, policy.maxBytes)
 		if err != nil {
-			log.Printf("[WARN] file download failed: %v", err)
+			observability.Log("warn", "telegram media download failed", map[string]interface{}{"error": err.Error()})
 			continue
 		}
 
 		detectedContentType := normalizeContentType(http.DetectContentType(data))
 		if !isAllowedContentType(policy, detectedContentType) {
 			if !(detectedContentType == "application/octet-stream" && isAllowedContentType(policy, declaredContentType)) {
-				log.Printf("[WARN] blocked media due to MIME policy (%s): %s", detectedContentType, fileName)
+				observability.Log("warn", "media blocked by MIME policy", map[string]interface{}{
+					"detected_content_type": detectedContentType,
+					"file_name":             fileName,
+				})
 				continue
 			}
 		}
 
 		if declaredContentType != "" && !isAllowedContentType(policy, declaredContentType) {
-			log.Printf("[WARN] blocked media due to declared MIME policy (%s): %s", declaredContentType, fileName)
+			observability.Log("warn", "media blocked by declared MIME policy", map[string]interface{}{
+				"declared_content_type": declaredContentType,
+				"file_name":             fileName,
+			})
 			continue
 		}
 
 		pairings, err := database.GetPairingsByTelegramChat(chatStringID)
 		if err != nil {
-			log.Printf("[WARN] failed to load pairings for Telegram chat %s: %v", chatStringID, err)
+			observability.Log("warn", "failed to load pairings for telegram chat", map[string]interface{}{
+				"source_tg_id": chatStringID,
+				"error":        err.Error(),
+			})
 			continue
 		}
 
@@ -139,13 +156,30 @@ func StartProducer(token string) {
 
 			enqueued, err := database.EnqueuePendingEvent(event)
 			if err != nil {
-				log.Printf("[WARN] failed to enqueue event %s: %v", event.EventID, err)
+				observability.LogEvent("error", "failed to enqueue event", event.EventID, map[string]interface{}{
+					"source_tg_id": chatStringID,
+					"target_dc_id": pairing.DCChannelID,
+					"file_name":    fileName,
+					"error":        err.Error(),
+				})
 				continue
 			}
 
 			if !enqueued {
-				log.Printf("[DUPLICATE] skipped already-known event: %s", event.EventID)
+				observability.LogEvent("info", "duplicate event skipped", event.EventID, map[string]interface{}{
+					"source_tg_id": chatStringID,
+					"target_dc_id": pairing.DCChannelID,
+					"file_name":    fileName,
+				})
+				continue
 			}
+
+			observability.RegisterEventEnqueued()
+			observability.LogEvent("info", "event enqueued", event.EventID, map[string]interface{}{
+				"source_tg_id": chatStringID,
+				"target_dc_id": pairing.DCChannelID,
+				"file_name":    fileName,
+			})
 		}
 	}
 }
