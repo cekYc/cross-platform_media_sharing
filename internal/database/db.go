@@ -435,6 +435,28 @@ func CountPairingsByTelegramChat(tgID string) (int, error) {
 	return count, nil
 }
 
+func GetPairing(tgID, dcChannelID string) (Pairing, error) {
+	rows, err := DB.Query(
+		"SELECT tg_chat_id, dc_channel_id, blocked_words, rule_config FROM pairings WHERE tg_chat_id = ? AND dc_channel_id = ?",
+		tgID, dcChannelID,
+	)
+	if err != nil {
+		return Pairing{}, err
+	}
+	defer rows.Close()
+
+	pairings, err := scanPairings(rows)
+	if err != nil {
+		return Pairing{}, err
+	}
+
+	if len(pairings) == 0 {
+		return Pairing{}, sql.ErrNoRows
+	}
+
+	return pairings[0], nil
+}
+
 func scanPairings(rows *sql.Rows) ([]Pairing, error) {
 	pairings := make([]Pairing, 0)
 

@@ -19,4 +19,8 @@ type RuleConfig struct {
 	// 4. Spam controls
 	BurstLimit  int `json:"burst_limit,omitempty"`  // Messages allowed per BurstWindow
 	BurstWindow int `json:"burst_window,omitempty"` // In seconds
+
+	// 5. Message Formatting and UX
+	CaptionTemplate string `json:"caption_template,omitempty"` // e.g. "From {sender}:\n{caption}"
+	Language        string `json:"language,omitempty"`         // "en" or "tr"
 }

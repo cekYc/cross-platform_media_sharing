@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"tg-discord-bot/internal/database"
+	"tg-discord-bot/internal/i18n"
 	"tg-discord-bot/internal/models"
 	"tg-discord-bot/internal/observability"
 	"tg-discord-bot/internal/rules"
@@ -102,8 +103,28 @@ func StartProducer(token string) {
 		}
 
 		senderID := ""
+		senderName := ""
 		if update.Message.From != nil {
 			senderID = fmt.Sprintf("%d", update.Message.From.ID)
+			senderName = strings.TrimSpace(update.Message.From.FirstName + " " + update.Message.From.LastName)
+			if senderName == "" {
+				senderName = update.Message.From.UserName
+			}
+		}
+
+		replyToSender := ""
+		replyToCaption := ""
+		if update.Message.ReplyToMessage != nil {
+			if update.Message.ReplyToMessage.From != nil {
+				replyToSender = strings.TrimSpace(update.Message.ReplyToMessage.From.FirstName + " " + update.Message.ReplyToMessage.From.LastName)
+				if replyToSender == "" {
+					replyToSender = update.Message.ReplyToMessage.From.UserName
+				}
+			}
+			replyToCaption = update.Message.ReplyToMessage.Text
+			if replyToCaption == "" {
+				replyToCaption = update.Message.ReplyToMessage.Caption
+			}
 		}
 
 		var validPairings []database.Pairing
@@ -179,16 +200,19 @@ func StartProducer(token string) {
 			availableAt, _ := rules.EvaluateTimeRule(pairing.RuleConfig, time.Now())
 
 			event := models.MediaEvent{
-				EventID:      buildEventID(update.Message, fileID, pairing.DCChannelID),
-				Data:         data,
-				FileName:     fileName,
-				Caption:      update.Message.Caption,
-				SourceTGID:   chatStringID,
-				TargetDCID:   pairing.DCChannelID,
-				MediaGroupID: update.Message.MediaGroupID,
-				MediaType:    mediaType,
-				ContentType:  detectedContentType,
-				AvailableAt:  availableAt.Unix(),
+				EventID:        buildEventID(update.Message, fileID, pairing.DCChannelID),
+				Data:           data,
+				FileName:       fileName,
+				Caption:        update.Message.Caption,
+				SourceTGID:     chatStringID,
+				TargetDCID:     pairing.DCChannelID,
+				MediaGroupID:   update.Message.MediaGroupID,
+				MediaType:      mediaType,
+				ContentType:    detectedContentType,
+				AvailableAt:    availableAt.Unix(),
+				SenderName:     senderName,
+				ReplyToSender:  replyToSender,
+				ReplyToCaption: replyToCaption,
 			}
 
 			enqueued, err := database.EnqueuePendingEvent(event)
@@ -247,20 +271,22 @@ func handleCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message, chatStringID
 		handleClearBlocksCommand(bot, message.Chat.ID, chatStringID, args)
 	case "setrule":
 		handleSetRuleCommand(bot, message.Chat.ID, chatStringID, args)
-	case "help", "start":
-		helpText := "Commands:\n" +
-			"/id - show this Telegram chat ID\n" +
-			"/status - show linked Discord channels\n" +
-			"/block <word_or_phrase> - add blocked text for all linked channels\n" +
-			"/block <discord_channel_id> <word_or_phrase> - add blocked text for one channel\n" +
-			"/blocklist [discord_channel_id] - show blocked words\n" +
-			"/unblock <word_or_phrase> - remove blocked text from all linked channels\n" +
-			"/unblock <discord_channel_id> <word_or_phrase> - remove from one channel\n" +
-			"/clearblocks [discord_channel_id] - clear blocked words\n" +
-			"/setrule <discord_channel_id> <json> - set advanced rules (JSON)"
+	case "start":
+		msg := tgbotapi.NewMessage(message.Chat.ID, i18n.Get("en", "welcome_step1")+"\n\n"+fmt.Sprintf(i18n.Get("en", "welcome_step2"), chatStringID))
+		msg.ParseMode = "Markdown"
+		sendTelegramMessage(bot, msg)
+	case "help":
+		helpText := i18n.Get("en", "help_title") + "\n" +
+			"/id - " + i18n.Get("en", "help_id") + "\n" +
+			"/status - " + i18n.Get("en", "help_status") + "\n" +
+			"/block <word> - " + i18n.Get("en", "help_block") + "\n" +
+			"/blocklist - " + i18n.Get("en", "help_blocklist") + "\n" +
+			"/unblock <word> - " + i18n.Get("en", "help_unblock") + "\n" +
+			"/clearblocks - " + i18n.Get("en", "help_clearblocks") + "\n" +
+			"/setrule <json> - " + i18n.Get("en", "help_setrule")
 		sendTelegramText(bot, message.Chat.ID, helpText)
 	default:
-		sendTelegramText(bot, message.Chat.ID, "Unknown command. Use /help")
+		sendTelegramText(bot, message.Chat.ID, i18n.Get("en", "help_unknown"))
 	}
 }
 

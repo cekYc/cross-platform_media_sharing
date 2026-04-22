@@ -79,20 +79,20 @@ This document collects all feature and product ideas for the project in one plac
 
 ## 5) Message Formatting and UX
 
-1. Rich caption templates
-- Include sender name, source chat, timestamp, and media metadata.
+- [x] 1. Rich caption templates
+	- [x] Include sender name, source chat, timestamp, and media metadata.
 
-2. Localization
-- Multi-language command responses (EN/TR), configurable default language.
+- [x] 2. Localization
+	- [x] Multi-language command responses (EN/TR), configurable default language.
 
-3. Better help and onboarding
-- Guided setup flow with validation checks.
+- [x] 3. Better help and onboarding
+	- [x] Guided setup flow with validation checks.
 
-4. Command discoverability
-- Explicit /help sections per role and per platform.
+- [x] 4. Command discoverability
+	- [x] Explicit /help sections per role and per platform.
 
-5. Reply mapping
-- Optional reference linking so Discord replies can include source context.
+- [x] 5. Reply mapping
+	- [x] Optional reference linking so Discord replies can include source context.
 
 ## 6) Platform Expansion
 

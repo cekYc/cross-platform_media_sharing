@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"tg-discord-bot/internal/database"
+	"tg-discord-bot/internal/i18n"
 	"tg-discord-bot/internal/models"
 	"tg-discord-bot/internal/observability"
 	"time"
@@ -218,17 +219,23 @@ func resolvePositiveIntEnv(name string, defaultValue int) int {
 }
 
 func handleHelpCommand(s *discordgo.Session, channelID string) {
-	message := "Commands:\n" +
+	pairings, _ := database.GetPairingsByDiscordChannel(channelID)
+	lang := "en"
+	if len(pairings) > 0 && pairings[0].RuleConfig.Language != "" {
+		lang = pairings[0].RuleConfig.Language
+	}
+
+	message := i18n.Get(lang, "help_title") + "\n" +
 		"`!join <telegram_chat_id>` - link this Discord channel to a Telegram chat\n" +
 		"`!unlink <telegram_chat_id>` - remove one Telegram link from this channel\n" +
-		"`!status [telegram_chat_id]` - show link and filter status\n" +
-		"`!blocklist [telegram_chat_id]` - show blocked words\n" +
-		"`!unblock <word_or_phrase>` - remove a blocked word (single-link channels)\n" +
+		"`!status [telegram_chat_id]` - " + i18n.Get(lang, "help_status") + "\n" +
+		"`!blocklist [telegram_chat_id]` - " + i18n.Get(lang, "help_blocklist") + "\n" +
+		"`!unblock <word_or_phrase>` - " + i18n.Get(lang, "help_unblock") + "\n" +
 		"`!unblock <telegram_chat_id> <word_or_phrase>` - remove from a specific link\n" +
-		"`!clearblocks [telegram_chat_id]` - clear blocked words for one link\n" +
+		"`!clearblocks [telegram_chat_id]` - " + i18n.Get(lang, "help_clearblocks") + "\n" +
 		"`!deadletters [limit]` - show failed deliveries for this channel\n" +
 		"`!replaydead <dead_letter_id>` - replay one dead-letter item\n" +
-		"`!setrule <telegram_chat_id> <json>` - set advanced rules (JSON)\n" +
+		"`!setrule <telegram_chat_id> <json>` - " + i18n.Get(lang, "help_setrule") + "\n" +
 		"`!help` - show this help"
 	sendChannelMessage(s, channelID, message)
 }
@@ -644,6 +651,11 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 		return
 	}
 
+	pairing, err := database.GetPairing(event.SourceTGID, event.TargetDCID)
+	if err == nil {
+		event = applyFormatting(event, pairing.RuleConfig)
+	}
+
 	if event.MediaGroupID != "" {
 		bufferAlbumEvent(queuedEvent)
 		return
@@ -682,6 +694,32 @@ func bufferAlbumEvent(queuedEvent database.QueuedEvent) {
 
 	batch.items = append(batch.items, queuedEvent)
 	batch.lastSeen = now
+}
+
+func applyFormatting(event models.MediaEvent, ruleConfig models.RuleConfig) models.MediaEvent {
+	caption := event.Caption
+
+	if ruleConfig.CaptionTemplate != "" {
+		tpl := ruleConfig.CaptionTemplate
+		tpl = strings.ReplaceAll(tpl, "{caption}", event.Caption)
+		tpl = strings.ReplaceAll(tpl, "{sender}", event.SenderName)
+		tpl = strings.ReplaceAll(tpl, "{source_chat}", event.SourceTGID)
+		tpl = strings.ReplaceAll(tpl, "{time}", time.Now().Format("15:04"))
+		caption = tpl
+	}
+
+	if event.ReplyToSender != "" {
+		replyPreview := event.ReplyToCaption
+		if len(replyPreview) > 80 {
+			replyPreview = replyPreview[:77] + "..."
+		}
+		
+		blockquote := fmt.Sprintf("> **In reply to %s:**\n> %s\n\n", event.ReplyToSender, replyPreview)
+		caption = blockquote + caption
+	}
+
+	event.Caption = strings.TrimSpace(caption)
+	return event
 }
 
 func flushReadyAlbums(now time.Time) {
