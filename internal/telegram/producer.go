@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/models"
 	"tg-discord-bot/internal/observability"
+	"tg-discord-bot/internal/rules"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -86,6 +88,46 @@ func StartProducer(token string) {
 			continue
 		}
 
+		pairings, err := database.GetPairingsByTelegramChat(chatStringID)
+		if err != nil {
+			observability.Log("warn", "failed to load pairings for telegram chat", map[string]interface{}{
+				"source_tg_id": chatStringID,
+				"error":        err.Error(),
+			})
+			continue
+		}
+
+		if len(pairings) == 0 {
+			continue
+		}
+
+		senderID := ""
+		if update.Message.From != nil {
+			senderID = fmt.Sprintf("%d", update.Message.From.ID)
+		}
+
+		var validPairings []database.Pairing
+		for _, p := range pairings {
+			if !rules.EvaluateFilterRule(p.RuleConfig, update.Message.Caption, senderID) {
+				continue
+			}
+			if !rules.EvaluateSpamRule(p.RuleConfig, chatStringID, p.DCChannelID) {
+				observability.Log("info", "message dropped by spam rule", map[string]interface{}{
+					"source_tg_id": chatStringID,
+					"target_dc_id": p.DCChannelID,
+				})
+				continue
+			}
+			if !rules.EvaluateFileRule(p.RuleConfig, fileSize, declaredContentType) {
+				continue
+			}
+			validPairings = append(validPairings, p)
+		}
+
+		if len(validPairings) == 0 {
+			continue
+		}
+
 		policy := policyForMediaType(mediaType)
 		if policy.maxBytes > 0 && fileSize > policy.maxBytes {
 			observability.Log("warn", "media exceeds configured size limit", map[string]interface{}{
@@ -128,20 +170,14 @@ func StartProducer(token string) {
 			continue
 		}
 
-		pairings, err := database.GetPairingsByTelegramChat(chatStringID)
-		if err != nil {
-			observability.Log("warn", "failed to load pairings for telegram chat", map[string]interface{}{
-				"source_tg_id": chatStringID,
-				"error":        err.Error(),
-			})
-			continue
-		}
+		for _, pairing := range validPairings {
+			// Re-evaluate FileRule just in case the detected content type is different and blocked
+			if !rules.EvaluateFileRule(pairing.RuleConfig, int64(len(data)), detectedContentType) {
+				continue
+			}
 
-		if len(pairings) == 0 {
-			continue
-		}
+			availableAt, _ := rules.EvaluateTimeRule(pairing.RuleConfig, time.Now())
 
-		for _, pairing := range pairings {
 			event := models.MediaEvent{
 				EventID:      buildEventID(update.Message, fileID, pairing.DCChannelID),
 				Data:         data,
@@ -152,6 +188,7 @@ func StartProducer(token string) {
 				MediaGroupID: update.Message.MediaGroupID,
 				MediaType:    mediaType,
 				ContentType:  detectedContentType,
+				AvailableAt:  availableAt.Unix(),
 			}
 
 			enqueued, err := database.EnqueuePendingEvent(event)
@@ -208,6 +245,8 @@ func handleCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message, chatStringID
 		handleUnblockCommand(bot, message.Chat.ID, chatStringID, args)
 	case "clearblocks":
 		handleClearBlocksCommand(bot, message.Chat.ID, chatStringID, args)
+	case "setrule":
+		handleSetRuleCommand(bot, message.Chat.ID, chatStringID, args)
 	case "help", "start":
 		helpText := "Commands:\n" +
 			"/id - show this Telegram chat ID\n" +
@@ -217,7 +256,8 @@ func handleCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message, chatStringID
 			"/blocklist [discord_channel_id] - show blocked words\n" +
 			"/unblock <word_or_phrase> - remove blocked text from all linked channels\n" +
 			"/unblock <discord_channel_id> <word_or_phrase> - remove from one channel\n" +
-			"/clearblocks [discord_channel_id] - clear blocked words"
+			"/clearblocks [discord_channel_id] - clear blocked words\n" +
+			"/setrule <discord_channel_id> <json> - set advanced rules (JSON)"
 		sendTelegramText(bot, message.Chat.ID, helpText)
 	default:
 		sendTelegramText(bot, message.Chat.ID, "Unknown command. Use /help")
@@ -432,6 +472,34 @@ func handleClearBlocksCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args
 	}
 
 	sendTelegramText(bot, chatID, fmt.Sprintf("✅ Cleared block list for %d linked channel(s).", clearedChannels))
+}
+
+func handleSetRuleCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args string) {
+	parts := strings.SplitN(strings.TrimSpace(args), " ", 2)
+	if len(parts) < 2 {
+		sendTelegramText(bot, chatID, "Usage: /setrule <discord_channel_id> <json_string>")
+		return
+	}
+
+	targetChannelID := parts[0]
+	jsonStr := strings.TrimPrefix(parts[1], "```json")
+	jsonStr = strings.TrimPrefix(jsonStr, "```")
+	jsonStr = strings.TrimSuffix(jsonStr, "```")
+	jsonStr = strings.TrimSpace(jsonStr)
+
+	var config models.RuleConfig
+	if err := json.Unmarshal([]byte(jsonStr), &config); err != nil {
+		sendTelegramText(bot, chatID, "❌ Invalid JSON format: "+err.Error())
+		return
+	}
+
+	if err := database.UpdateRuleConfig(tgChatID, targetChannelID, config); err != nil {
+		sendTelegramText(bot, chatID, "❌ Failed to update rules.")
+		log.Printf("[WARN] failed to update rules for channel %s: %v", targetChannelID, err)
+		return
+	}
+
+	sendTelegramText(bot, chatID, fmt.Sprintf("✅ Successfully updated rules for Discord channel `%s`.", targetChannelID))
 }
 
 func resolveOptionalChannelArg(args string, pairings []database.Pairing) (string, string) {

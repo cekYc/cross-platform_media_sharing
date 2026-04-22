@@ -18,6 +18,7 @@ type Pairing struct {
 	TGChatID     string
 	DCChannelID  string
 	BlockedWords []string
+	RuleConfig   models.RuleConfig
 }
 
 type QueuedEvent struct {
@@ -75,6 +76,10 @@ func ensurePairingsSchema() error {
 	}
 
 	if err := ensureColumnExists("pairings", "blocked_words", "TEXT DEFAULT ''"); err != nil {
+		return err
+	}
+
+	if err := ensureColumnExists("pairings", "rule_config", "TEXT DEFAULT '{}'"); err != nil {
 		return err
 	}
 
@@ -150,6 +155,7 @@ func createPairingsTable() error {
 			tg_chat_id TEXT NOT NULL,
 			dc_channel_id TEXT NOT NULL,
 			blocked_words TEXT DEFAULT '',
+			rule_config TEXT DEFAULT '{}',
 			PRIMARY KEY (tg_chat_id, dc_channel_id)
 		)`,
 		"CREATE INDEX IF NOT EXISTS idx_pairings_tg_chat_id ON pairings(tg_chat_id)",
@@ -171,6 +177,7 @@ func createPairingsTableTx(tx *sql.Tx) error {
 			tg_chat_id TEXT NOT NULL,
 			dc_channel_id TEXT NOT NULL,
 			blocked_words TEXT DEFAULT '',
+			rule_config TEXT DEFAULT '{}',
 			PRIMARY KEY (tg_chat_id, dc_channel_id)
 		)`,
 		"CREATE INDEX IF NOT EXISTS idx_pairings_tg_chat_id ON pairings(tg_chat_id)",
@@ -263,10 +270,23 @@ func migrateLegacyPairingsTable() error {
 		return err
 	}
 
-	insertQuery := "INSERT INTO pairings (tg_chat_id, dc_channel_id, blocked_words) SELECT tg_chat_id, dc_channel_id, '' FROM pairings_legacy"
-	if hasBlockedWords {
-		insertQuery = "INSERT INTO pairings (tg_chat_id, dc_channel_id, blocked_words) SELECT tg_chat_id, dc_channel_id, COALESCE(blocked_words, '') FROM pairings_legacy"
+	hasRuleConfig, err := tableHasColumnTx(tx, "pairings_legacy", "rule_config")
+	if err != nil {
+		tx.Rollback()
+		return err
 	}
+
+	blockedCol := "''"
+	if hasBlockedWords {
+		blockedCol = "COALESCE(blocked_words, '')"
+	}
+
+	ruleCol := "'{}'"
+	if hasRuleConfig {
+		ruleCol = "COALESCE(rule_config, '{}')"
+	}
+
+	insertQuery := fmt.Sprintf("INSERT INTO pairings (tg_chat_id, dc_channel_id, blocked_words, rule_config) SELECT tg_chat_id, dc_channel_id, %s, %s FROM pairings_legacy", blockedCol, ruleCol)
 
 	if _, err := tx.Exec(insertQuery); err != nil {
 		tx.Rollback()
@@ -381,7 +401,7 @@ func UnlinkChannel(tgID, dcChannelID string) (bool, error) {
 
 func GetPairingsByTelegramChat(tgID string) ([]Pairing, error) {
 	rows, err := DB.Query(
-		"SELECT tg_chat_id, dc_channel_id, blocked_words FROM pairings WHERE tg_chat_id = ? ORDER BY dc_channel_id",
+		"SELECT tg_chat_id, dc_channel_id, blocked_words, rule_config FROM pairings WHERE tg_chat_id = ? ORDER BY dc_channel_id",
 		tgID,
 	)
 	if err != nil {
@@ -394,7 +414,7 @@ func GetPairingsByTelegramChat(tgID string) ([]Pairing, error) {
 
 func GetPairingsByDiscordChannel(dcChannelID string) ([]Pairing, error) {
 	rows, err := DB.Query(
-		"SELECT tg_chat_id, dc_channel_id, blocked_words FROM pairings WHERE dc_channel_id = ? ORDER BY tg_chat_id",
+		"SELECT tg_chat_id, dc_channel_id, blocked_words, rule_config FROM pairings WHERE dc_channel_id = ? ORDER BY tg_chat_id",
 		dcChannelID,
 	)
 	if err != nil {
@@ -422,15 +442,22 @@ func scanPairings(rows *sql.Rows) ([]Pairing, error) {
 		var tgID string
 		var dcChannelID string
 		var blockedWords sql.NullString
+		var ruleConfigStr sql.NullString
 
-		if err := rows.Scan(&tgID, &dcChannelID, &blockedWords); err != nil {
+		if err := rows.Scan(&tgID, &dcChannelID, &blockedWords, &ruleConfigStr); err != nil {
 			return nil, err
+		}
+
+		var ruleConfig models.RuleConfig
+		if ruleConfigStr.Valid && ruleConfigStr.String != "" {
+			_ = json.Unmarshal([]byte(ruleConfigStr.String), &ruleConfig)
 		}
 
 		pairings = append(pairings, Pairing{
 			TGChatID:     tgID,
 			DCChannelID:  dcChannelID,
 			BlockedWords: splitBlockedWords(blockedWords),
+			RuleConfig:   ruleConfig,
 		})
 	}
 
@@ -439,6 +466,40 @@ func scanPairings(rows *sql.Rows) ([]Pairing, error) {
 	}
 
 	return pairings, nil
+}
+
+func UpdateRuleConfig(tgID, dcChannelID string, config models.RuleConfig) error {
+	configBytes, err := json.Marshal(config)
+	if err != nil {
+		return err
+	}
+
+	_, err = DB.Exec(
+		"UPDATE pairings SET rule_config = ? WHERE tg_chat_id = ? AND dc_channel_id = ?",
+		string(configBytes),
+		tgID,
+		dcChannelID,
+	)
+	return err
+}
+
+func GetRuleConfig(tgID, dcChannelID string) (models.RuleConfig, error) {
+	var ruleConfigStr sql.NullString
+	err := DB.QueryRow(
+		"SELECT rule_config FROM pairings WHERE tg_chat_id = ? AND dc_channel_id = ?",
+		tgID,
+		dcChannelID,
+	).Scan(&ruleConfigStr)
+	
+	if err != nil {
+		return models.RuleConfig{}, err
+	}
+
+	var config models.RuleConfig
+	if ruleConfigStr.Valid && ruleConfigStr.String != "" {
+		_ = json.Unmarshal([]byte(ruleConfigStr.String), &config)
+	}
+	return config, nil
 }
 
 func GetBlockedWords(tgID, dcChannelID string) ([]string, error) {
@@ -694,6 +755,10 @@ func EnqueuePendingEvent(event models.MediaEvent) (bool, error) {
 	}
 
 	now := time.Now().Unix()
+	availableAt := now
+	if event.AvailableAt > 0 {
+		availableAt = event.AvailableAt
+	}
 
 	tx, err := DB.Begin()
 	if err != nil {
@@ -730,7 +795,7 @@ func EnqueuePendingEvent(event models.MediaEvent) (bool, error) {
 		event.SourceTGID,
 		event.TargetDCID,
 		string(payload),
-		now,
+		availableAt,
 		now,
 	)
 	if err != nil {

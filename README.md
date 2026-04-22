@@ -7,6 +7,8 @@ A Go bot that forwards media from Telegram chats to mapped Discord channels.
 - Telegram media forwarding to Discord attachments
 - Multi-link mapping: one Telegram chat can forward to multiple Discord channels
 - Per-channel block lists and admin command controls
+- **Advanced Moderation Engine**: Per-channel JSON configuration for regex filtering, sender blocks, and specific file size/MIME rules.
+- **Spam Controls & Time Rules**: Built-in burst limiting and quiet hours (queue content during quiet hours, deliver later).
 - Persistent SQLite-backed delivery queue (survives restarts)
 - Delivery retry with exponential backoff and dead-letter queue
 - Idempotent event processing via deterministic event IDs
@@ -30,6 +32,7 @@ Telegram commands:
 - `/unblock <word_or_phrase>`: Remove blocked text from all linked channels
 - `/unblock <discord_channel_id> <word_or_phrase>`: Remove from one channel
 - `/clearblocks [discord_channel_id]`: Clear blocked text
+- `/setrule <discord_channel_id> <json>`: Set advanced rules (JSON format)
 - `/help`: Show command help
 
 Discord commands:
@@ -42,6 +45,7 @@ Discord commands:
 - `!clearblocks [telegram_chat_id]`: Clear blocked words
 - `!deadletters [limit]`: Inspect failed deliveries for this channel
 - `!replaydead <dead_letter_id>`: Replay a dead-letter item
+- `!setrule <telegram_chat_id> <json>`: Set advanced rules (JSON format)
 - `!help`: Show command help
 
 ## Environment Variables

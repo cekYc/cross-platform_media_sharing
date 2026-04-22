@@ -61,21 +61,21 @@ This document collects all feature and product ideas for the project in one plac
 
 ## 4) Moderation and Rule Engine
 
-1. Advanced filtering rules
-- Word, phrase, regex, and sender-based rules.
-- Include and exclude precedence.
+- [x] 1. Advanced filtering rules
+	- [x] Word, phrase, regex, and sender-based rules.
+	- [x] Include and exclude precedence.
 
-2. File rules
-- Per-chat or per-target limits for type, size, duration.
+- [x] 2. File rules
+	- [x] Per-chat or per-target limits for type, size, duration.
 
-3. Time-based rules
-- Quiet hours: queue content and deliver later.
+- [x] 3. Time-based rules
+	- [x] Quiet hours: queue content and deliver later.
 
-4. Spam controls
-- Burst limits and repeated-caption detection.
+- [x] 4. Spam controls
+	- [x] Burst limits and repeated-caption detection.
 
-5. Optional AI moderation layer
-- NSFW/spam scoring before forwarding.
+- [ ] 5. Optional AI moderation layer (Skipped for now)
+	- [ ] NSFW/spam scoring before forwarding.
 
 ## 5) Message Formatting and UX
 

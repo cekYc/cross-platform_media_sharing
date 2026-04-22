@@ -17,4 +17,5 @@ type MediaEvent struct {
 	MediaGroupID string
 	MediaType    string
 	ContentType  string
+	AvailableAt  int64 // If set, delay delivery until this Unix timestamp
 }

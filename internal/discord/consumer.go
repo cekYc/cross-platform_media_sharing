@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -115,6 +116,8 @@ func handleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		handleDeadLettersCommand(s, m, parts)
 	case "!replaydead":
 		handleReplayDeadCommand(s, m, parts)
+	case "!setrule":
+		handleSetRuleCommand(s, m)
 	case "!help":
 		handleHelpCommand(s, m.ChannelID)
 	}
@@ -122,7 +125,7 @@ func handleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 func isManagedCommand(command string) bool {
 	switch command {
-	case "!join", "!unlink", "!status", "!help", "!blocklist", "!unblock", "!clearblocks", "!deadletters", "!replaydead":
+	case "!join", "!unlink", "!status", "!help", "!blocklist", "!unblock", "!clearblocks", "!deadletters", "!replaydead", "!setrule":
 		return true
 	default:
 		return false
@@ -225,6 +228,7 @@ func handleHelpCommand(s *discordgo.Session, channelID string) {
 		"`!clearblocks [telegram_chat_id]` - clear blocked words for one link\n" +
 		"`!deadletters [limit]` - show failed deliveries for this channel\n" +
 		"`!replaydead <dead_letter_id>` - replay one dead-letter item\n" +
+		"`!setrule <telegram_chat_id> <json>` - set advanced rules (JSON)\n" +
 		"`!help` - show this help"
 	sendChannelMessage(s, channelID, message)
 }
@@ -483,6 +487,34 @@ func handleReplayDeadCommand(s *discordgo.Session, m *discordgo.MessageCreate, p
 	}
 
 	sendChannelMessage(s, m.ChannelID, fmt.Sprintf("✅ Requeued dead-letter item `%d`.", deadLetterID))
+}
+
+func handleSetRuleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
+	parts := strings.SplitN(strings.TrimSpace(m.Content), " ", 3)
+	if len(parts) < 3 {
+		sendChannelMessage(s, m.ChannelID, "Usage: `!setrule <telegram_chat_id> <json_string>`\nExample: `!setrule -100123 {\"burst_limit\": 5, \"burst_window\": 60}`")
+		return
+	}
+
+	tgID := parts[1]
+	jsonStr := strings.TrimPrefix(parts[2], "```json")
+	jsonStr = strings.TrimPrefix(jsonStr, "```")
+	jsonStr = strings.TrimSuffix(jsonStr, "```")
+	jsonStr = strings.TrimSpace(jsonStr)
+
+	var config models.RuleConfig
+	if err := json.Unmarshal([]byte(jsonStr), &config); err != nil {
+		sendChannelMessage(s, m.ChannelID, "❌ Invalid JSON format: "+err.Error())
+		return
+	}
+
+	if err := database.UpdateRuleConfig(tgID, m.ChannelID, config); err != nil {
+		sendChannelMessage(s, m.ChannelID, "❌ Failed to update rules.")
+		log.Printf("[WARN] failed to update rules for channel %s: %v", m.ChannelID, err)
+		return
+	}
+
+	sendChannelMessage(s, m.ChannelID, fmt.Sprintf("✅ Successfully updated rules for Telegram chat `%s`.", tgID))
 }
 
 func parseUnblockCommand(pairings []database.Pairing, args []string) (string, string) {
