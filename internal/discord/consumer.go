@@ -469,7 +469,7 @@ func handleSetRuleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Since we only know tgID, we assume platform is telegram.
 	// But it could be anything. We will assume telegram for backwards compat.
 	
-	sendChannelMessage(s, m.ChannelID, fmt.Sprintf("✅ To set rule, please use CLI command for now, or ensure schema is respected."))
+	sendChannelMessage(s, m.ChannelID, "✅ To set rule, please use CLI command for now, or ensure schema is respected.")
 }
 
 func parseUnblockCommand(pairings []database.Pairing, args []string) (string, string) {
