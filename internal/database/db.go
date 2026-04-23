@@ -15,10 +15,13 @@ import (
 )
 
 type Pairing struct {
-	TGChatID     string
-	DCChannelID  string
-	BlockedWords []string
-	RuleConfig   models.RuleConfig
+	SourcePlatform string
+	SourceID       string
+	TargetPlatform string
+	TargetID       string
+	BlockedWords   []string
+	RuleConfig     models.RuleConfig
+	WebhookSecret  string
 }
 
 type QueuedEvent struct {
@@ -27,14 +30,16 @@ type QueuedEvent struct {
 }
 
 type DeadLetter struct {
-	ID            int64
-	EventID       string
-	SourceTGID    string
-	TargetDCID    string
-	FileName      string
-	RetryCount    int
-	FailureReason string
-	FailedAt      time.Time
+	ID             int64
+	EventID        string
+	SourcePlatform string
+	SourceID       string
+	TargetPlatform string
+	TargetID       string
+	FileName       string
+	RetryCount     int
+	FailureReason  string
+	FailedAt       time.Time
 }
 
 var DB *sql.DB
@@ -83,11 +88,15 @@ func ensurePairingsSchema() error {
 		return err
 	}
 
-	if err := ensureIndexExists("idx_pairings_tg_chat_id", "pairings", "tg_chat_id"); err != nil {
+	if err := ensureColumnExists("pairings", "webhook_secret", "TEXT DEFAULT ''"); err != nil {
 		return err
 	}
 
-	if err := ensureIndexExists("idx_pairings_dc_channel_id", "pairings", "dc_channel_id"); err != nil {
+	if err := ensureIndexExists("idx_pairings_source", "pairings", "source_platform, source_id"); err != nil {
+		return err
+	}
+
+	if err := ensureIndexExists("idx_pairings_target", "pairings", "target_platform, target_id"); err != nil {
 		return err
 	}
 
@@ -98,8 +107,10 @@ func ensureQueueSchema() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS pending_events (
 			event_id TEXT PRIMARY KEY,
-			source_tg_id TEXT NOT NULL,
-			target_dc_channel_id TEXT NOT NULL,
+			source_platform TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			target_platform TEXT NOT NULL,
+			target_id TEXT NOT NULL,
 			payload TEXT NOT NULL,
 			available_at INTEGER NOT NULL,
 			retry_count INTEGER NOT NULL DEFAULT 0,
@@ -107,7 +118,7 @@ func ensureQueueSchema() error {
 			created_at INTEGER NOT NULL
 		)`,
 		"CREATE INDEX IF NOT EXISTS idx_pending_events_available_at ON pending_events(available_at)",
-		"CREATE INDEX IF NOT EXISTS idx_pending_events_target_dc_channel_id ON pending_events(target_dc_channel_id)",
+		"CREATE INDEX IF NOT EXISTS idx_pending_events_target ON pending_events(target_platform, target_id)",
 		`CREATE TABLE IF NOT EXISTS processed_events (
 			event_id TEXT PRIMARY KEY,
 			processed_at INTEGER NOT NULL
@@ -115,15 +126,17 @@ func ensureQueueSchema() error {
 		`CREATE TABLE IF NOT EXISTS dead_letters (
 			dead_letter_id INTEGER PRIMARY KEY AUTOINCREMENT,
 			event_id TEXT NOT NULL,
-			source_tg_id TEXT NOT NULL,
-			target_dc_channel_id TEXT NOT NULL,
+			source_platform TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			target_platform TEXT NOT NULL,
+			target_id TEXT NOT NULL,
 			file_name TEXT NOT NULL,
 			payload TEXT NOT NULL,
 			retry_count INTEGER NOT NULL,
 			failure_reason TEXT NOT NULL,
 			failed_at INTEGER NOT NULL
 		)`,
-		"CREATE INDEX IF NOT EXISTS idx_dead_letters_target_dc_channel_id ON dead_letters(target_dc_channel_id)",
+		"CREATE INDEX IF NOT EXISTS idx_dead_letters_target ON dead_letters(target_platform, target_id)",
 		"CREATE INDEX IF NOT EXISTS idx_dead_letters_failed_at ON dead_letters(failed_at)",
 	}
 
@@ -133,7 +146,38 @@ func ensureQueueSchema() error {
 		}
 	}
 
+	// Migrate queue legacy schema if exists
+	migrateLegacyQueueSchema()
+
 	return nil
+}
+
+func migrateLegacyQueueSchema() {
+	// simple check if source_tg_id exists
+	rows, err := DB.Query("PRAGMA table_info(pending_events)")
+	if err == nil {
+		defer rows.Close()
+		hasLegacy := false
+		for rows.Next() {
+			var cid int
+			var name string
+			var dataType string
+			var notNull int
+			var defaultValue sql.NullString
+			var pk int
+			rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk)
+			if name == "source_tg_id" {
+				hasLegacy = true
+			}
+		}
+		if hasLegacy {
+			// for simplicity of this major refactor, we just drop legacy queue items because
+			// the payload byte[] format changed anyway to FileURL.
+			DB.Exec("DROP TABLE pending_events")
+			DB.Exec("DROP TABLE dead_letters")
+			ensureQueueSchema()
+		}
+	}
 }
 
 func tableExists(tableName string) (bool, error) {
@@ -152,14 +196,17 @@ func tableExists(tableName string) (bool, error) {
 func createPairingsTable() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS pairings (
-			tg_chat_id TEXT NOT NULL,
-			dc_channel_id TEXT NOT NULL,
+			source_platform TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			target_platform TEXT NOT NULL,
+			target_id TEXT NOT NULL,
 			blocked_words TEXT DEFAULT '',
 			rule_config TEXT DEFAULT '{}',
-			PRIMARY KEY (tg_chat_id, dc_channel_id)
+			webhook_secret TEXT DEFAULT '',
+			PRIMARY KEY (source_platform, source_id, target_platform, target_id)
 		)`,
-		"CREATE INDEX IF NOT EXISTS idx_pairings_tg_chat_id ON pairings(tg_chat_id)",
-		"CREATE INDEX IF NOT EXISTS idx_pairings_dc_channel_id ON pairings(dc_channel_id)",
+		"CREATE INDEX IF NOT EXISTS idx_pairings_source ON pairings(source_platform, source_id)",
+		"CREATE INDEX IF NOT EXISTS idx_pairings_target ON pairings(target_platform, target_id)",
 	}
 
 	for _, query := range queries {
@@ -174,14 +221,17 @@ func createPairingsTable() error {
 func createPairingsTableTx(tx *sql.Tx) error {
 	queries := []string{
 		`CREATE TABLE pairings (
-			tg_chat_id TEXT NOT NULL,
-			dc_channel_id TEXT NOT NULL,
+			source_platform TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			target_platform TEXT NOT NULL,
+			target_id TEXT NOT NULL,
 			blocked_words TEXT DEFAULT '',
 			rule_config TEXT DEFAULT '{}',
-			PRIMARY KEY (tg_chat_id, dc_channel_id)
+			webhook_secret TEXT DEFAULT '',
+			PRIMARY KEY (source_platform, source_id, target_platform, target_id)
 		)`,
-		"CREATE INDEX IF NOT EXISTS idx_pairings_tg_chat_id ON pairings(tg_chat_id)",
-		"CREATE INDEX IF NOT EXISTS idx_pairings_dc_channel_id ON pairings(dc_channel_id)",
+		"CREATE INDEX IF NOT EXISTS idx_pairings_source ON pairings(source_platform, source_id)",
+		"CREATE INDEX IF NOT EXISTS idx_pairings_target ON pairings(target_platform, target_id)",
 	}
 
 	for _, query := range queries {
@@ -202,7 +252,6 @@ func isLegacyPairingsSchema() (bool, error) {
 
 	hasTGChatID := false
 	hasDCChannelID := false
-	primaryKeyColumns := make(map[string]struct{})
 
 	for rows.Next() {
 		var cid int
@@ -222,25 +271,9 @@ func isLegacyPairingsSchema() (bool, error) {
 		if name == "dc_channel_id" {
 			hasDCChannelID = true
 		}
-		if pk > 0 {
-			primaryKeyColumns[name] = struct{}{}
-		}
 	}
 
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-
-	if !hasTGChatID || !hasDCChannelID {
-		return false, nil
-	}
-
-	if len(primaryKeyColumns) == 1 {
-		_, isLegacy := primaryKeyColumns["tg_chat_id"]
-		return isLegacy, nil
-	}
-
-	return false, nil
+	return hasTGChatID && hasDCChannelID, nil
 }
 
 func migrateLegacyPairingsTable() error {
@@ -286,7 +319,7 @@ func migrateLegacyPairingsTable() error {
 		ruleCol = "COALESCE(rule_config, '{}')"
 	}
 
-	insertQuery := fmt.Sprintf("INSERT INTO pairings (tg_chat_id, dc_channel_id, blocked_words, rule_config) SELECT tg_chat_id, dc_channel_id, %s, %s FROM pairings_legacy", blockedCol, ruleCol)
+	insertQuery := fmt.Sprintf("INSERT INTO pairings (source_platform, source_id, target_platform, target_id, blocked_words, rule_config, webhook_secret) SELECT 'telegram', tg_chat_id, 'discord', dc_channel_id, %s, %s, '' FROM pairings_legacy", blockedCol, ruleCol)
 
 	if _, err := tx.Exec(insertQuery); err != nil {
 		tx.Rollback()
@@ -325,16 +358,12 @@ func ensureColumnExists(tableName, columnName, columnDefinition string) error {
 		}
 	}
 
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
 	_, err = DB.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, columnName, columnDefinition))
 	return err
 }
 
-func ensureIndexExists(indexName, tableName, columnName string) error {
-	_, err := DB.Exec(fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s(%s)", indexName, tableName, columnName))
+func ensureIndexExists(indexName, tableName, columns string) error {
+	_, err := DB.Exec(fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s(%s)", indexName, tableName, columns))
 	return err
 }
 
@@ -362,31 +391,32 @@ func tableHasColumnTx(tx *sql.Tx, tableName, columnName string) (bool, error) {
 		}
 	}
 
-	if err := rows.Err(); err != nil {
-		return false, err
-	}
-
 	return false, nil
 }
 
-func LinkChannel(tgID, dcChannelID string) error {
-	tgID = strings.TrimSpace(tgID)
-	dcChannelID = strings.TrimSpace(dcChannelID)
+func LinkChannel(sourcePlatform, sourceID, targetPlatform, targetID, webhookSecret string) error {
+	sourcePlatform = strings.TrimSpace(sourcePlatform)
+	sourceID = strings.TrimSpace(sourceID)
+	targetPlatform = strings.TrimSpace(targetPlatform)
+	targetID = strings.TrimSpace(targetID)
 
-	if tgID == "" || dcChannelID == "" {
-		return errors.New("telegram chat id and discord channel id are required")
+	if sourcePlatform == "" || sourceID == "" || targetPlatform == "" || targetID == "" {
+		return errors.New("all pairing ids and platforms are required")
 	}
 
 	_, err := DB.Exec(
-		"INSERT INTO pairings (tg_chat_id, dc_channel_id) VALUES (?, ?) ON CONFLICT(tg_chat_id, dc_channel_id) DO NOTHING",
-		tgID,
-		dcChannelID,
+		"INSERT INTO pairings (source_platform, source_id, target_platform, target_id, webhook_secret) VALUES (?, ?, ?, ?, ?) ON CONFLICT(source_platform, source_id, target_platform, target_id) DO UPDATE SET webhook_secret = excluded.webhook_secret",
+		sourcePlatform,
+		sourceID,
+		targetPlatform,
+		targetID,
+		webhookSecret,
 	)
 	return err
 }
 
-func UnlinkChannel(tgID, dcChannelID string) (bool, error) {
-	result, err := DB.Exec("DELETE FROM pairings WHERE tg_chat_id = ? AND dc_channel_id = ?", tgID, dcChannelID)
+func UnlinkChannel(sourcePlatform, sourceID, targetPlatform, targetID string) (bool, error) {
+	result, err := DB.Exec("DELETE FROM pairings WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?", sourcePlatform, sourceID, targetPlatform, targetID)
 	if err != nil {
 		return false, err
 	}
@@ -399,10 +429,10 @@ func UnlinkChannel(tgID, dcChannelID string) (bool, error) {
 	return rowsAffected > 0, nil
 }
 
-func GetPairingsByTelegramChat(tgID string) ([]Pairing, error) {
+func GetPairingsBySource(sourcePlatform, sourceID string) ([]Pairing, error) {
 	rows, err := DB.Query(
-		"SELECT tg_chat_id, dc_channel_id, blocked_words, rule_config FROM pairings WHERE tg_chat_id = ? ORDER BY dc_channel_id",
-		tgID,
+		"SELECT source_platform, source_id, target_platform, target_id, blocked_words, rule_config, webhook_secret FROM pairings WHERE source_platform = ? AND source_id = ? ORDER BY target_id",
+		sourcePlatform, sourceID,
 	)
 	if err != nil {
 		return nil, err
@@ -412,10 +442,10 @@ func GetPairingsByTelegramChat(tgID string) ([]Pairing, error) {
 	return scanPairings(rows)
 }
 
-func GetPairingsByDiscordChannel(dcChannelID string) ([]Pairing, error) {
+func GetPairingsByTarget(targetPlatform, targetID string) ([]Pairing, error) {
 	rows, err := DB.Query(
-		"SELECT tg_chat_id, dc_channel_id, blocked_words, rule_config FROM pairings WHERE dc_channel_id = ? ORDER BY tg_chat_id",
-		dcChannelID,
+		"SELECT source_platform, source_id, target_platform, target_id, blocked_words, rule_config, webhook_secret FROM pairings WHERE target_platform = ? AND target_id = ? ORDER BY source_id",
+		targetPlatform, targetID,
 	)
 	if err != nil {
 		return nil, err
@@ -425,20 +455,10 @@ func GetPairingsByDiscordChannel(dcChannelID string) ([]Pairing, error) {
 	return scanPairings(rows)
 }
 
-func CountPairingsByTelegramChat(tgID string) (int, error) {
-	var count int
-	err := DB.QueryRow("SELECT COUNT(*) FROM pairings WHERE tg_chat_id = ?", tgID).Scan(&count)
-	if err != nil {
-		return 0, err
-	}
-
-	return count, nil
-}
-
-func GetPairing(tgID, dcChannelID string) (Pairing, error) {
+func GetPairing(sourcePlatform, sourceID, targetPlatform, targetID string) (Pairing, error) {
 	rows, err := DB.Query(
-		"SELECT tg_chat_id, dc_channel_id, blocked_words, rule_config FROM pairings WHERE tg_chat_id = ? AND dc_channel_id = ?",
-		tgID, dcChannelID,
+		"SELECT source_platform, source_id, target_platform, target_id, blocked_words, rule_config, webhook_secret FROM pairings WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
+		sourcePlatform, sourceID, targetPlatform, targetID,
 	)
 	if err != nil {
 		return Pairing{}, err
@@ -461,12 +481,12 @@ func scanPairings(rows *sql.Rows) ([]Pairing, error) {
 	pairings := make([]Pairing, 0)
 
 	for rows.Next() {
-		var tgID string
-		var dcChannelID string
+		var sp, sid, tp, tid string
 		var blockedWords sql.NullString
 		var ruleConfigStr sql.NullString
+		var webhookSecret sql.NullString
 
-		if err := rows.Scan(&tgID, &dcChannelID, &blockedWords, &ruleConfigStr); err != nil {
+		if err := rows.Scan(&sp, &sid, &tp, &tid, &blockedWords, &ruleConfigStr, &webhookSecret); err != nil {
 			return nil, err
 		}
 
@@ -476,10 +496,13 @@ func scanPairings(rows *sql.Rows) ([]Pairing, error) {
 		}
 
 		pairings = append(pairings, Pairing{
-			TGChatID:     tgID,
-			DCChannelID:  dcChannelID,
-			BlockedWords: splitBlockedWords(blockedWords),
-			RuleConfig:   ruleConfig,
+			SourcePlatform: sp,
+			SourceID:       sid,
+			TargetPlatform: tp,
+			TargetID:       tid,
+			BlockedWords:   splitBlockedWords(blockedWords),
+			RuleConfig:     ruleConfig,
+			WebhookSecret:  webhookSecret.String,
 		})
 	}
 
@@ -490,46 +513,25 @@ func scanPairings(rows *sql.Rows) ([]Pairing, error) {
 	return pairings, nil
 }
 
-func UpdateRuleConfig(tgID, dcChannelID string, config models.RuleConfig) error {
+func UpdateRuleConfig(sourcePlatform, sourceID, targetPlatform, targetID string, config models.RuleConfig) error {
 	configBytes, err := json.Marshal(config)
 	if err != nil {
 		return err
 	}
 
 	_, err = DB.Exec(
-		"UPDATE pairings SET rule_config = ? WHERE tg_chat_id = ? AND dc_channel_id = ?",
+		"UPDATE pairings SET rule_config = ? WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
 		string(configBytes),
-		tgID,
-		dcChannelID,
+		sourcePlatform, sourceID, targetPlatform, targetID,
 	)
 	return err
 }
 
-func GetRuleConfig(tgID, dcChannelID string) (models.RuleConfig, error) {
-	var ruleConfigStr sql.NullString
-	err := DB.QueryRow(
-		"SELECT rule_config FROM pairings WHERE tg_chat_id = ? AND dc_channel_id = ?",
-		tgID,
-		dcChannelID,
-	).Scan(&ruleConfigStr)
-	
-	if err != nil {
-		return models.RuleConfig{}, err
-	}
-
-	var config models.RuleConfig
-	if ruleConfigStr.Valid && ruleConfigStr.String != "" {
-		_ = json.Unmarshal([]byte(ruleConfigStr.String), &config)
-	}
-	return config, nil
-}
-
-func GetBlockedWords(tgID, dcChannelID string) ([]string, error) {
+func GetBlockedWords(sourcePlatform, sourceID, targetPlatform, targetID string) ([]string, error) {
 	var words sql.NullString
 	err := DB.QueryRow(
-		"SELECT blocked_words FROM pairings WHERE tg_chat_id = ? AND dc_channel_id = ?",
-		tgID,
-		dcChannelID,
+		"SELECT blocked_words FROM pairings WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
+		sourcePlatform, sourceID, targetPlatform, targetID,
 	).Scan(&words)
 	if err != nil {
 		return []string{}, err
@@ -538,7 +540,7 @@ func GetBlockedWords(tgID, dcChannelID string) ([]string, error) {
 	return splitBlockedWords(words), nil
 }
 
-func AddBlockedWord(tgID, dcChannelID, word string) error {
+func AddBlockedWord(sourcePlatform, sourceID, targetPlatform, targetID, word string) error {
 	normalizedWord := normalizeBlockedWord(word)
 	if normalizedWord == "" {
 		return errors.New("blocked word cannot be empty")
@@ -546,9 +548,8 @@ func AddBlockedWord(tgID, dcChannelID, word string) error {
 
 	var currentWords sql.NullString
 	err := DB.QueryRow(
-		"SELECT blocked_words FROM pairings WHERE tg_chat_id = ? AND dc_channel_id = ?",
-		tgID,
-		dcChannelID,
+		"SELECT blocked_words FROM pairings WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
+		sourcePlatform, sourceID, targetPlatform, targetID,
 	).Scan(&currentWords)
 	if err != nil {
 		return err
@@ -557,16 +558,15 @@ func AddBlockedWord(tgID, dcChannelID, word string) error {
 	newWords := mergeBlockedWords(currentWords, normalizedWord)
 
 	_, err = DB.Exec(
-		"UPDATE pairings SET blocked_words = ? WHERE tg_chat_id = ? AND dc_channel_id = ?",
+		"UPDATE pairings SET blocked_words = ? WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
 		newWords,
-		tgID,
-		dcChannelID,
+		sourcePlatform, sourceID, targetPlatform, targetID,
 	)
 	return err
 }
 
-func AddBlockedWordForAllChannels(tgID, word string) (int, error) {
-	pairings, err := GetPairingsByTelegramChat(tgID)
+func AddBlockedWordForAllTargets(sourcePlatform, sourceID, word string) (int, error) {
+	pairings, err := GetPairingsBySource(sourcePlatform, sourceID)
 	if err != nil {
 		return 0, err
 	}
@@ -575,19 +575,18 @@ func AddBlockedWordForAllChannels(tgID, word string) (int, error) {
 		return 0, sql.ErrNoRows
 	}
 
-	updatedChannels := 0
+	updated := 0
 	for _, pairing := range pairings {
-		if err := AddBlockedWord(tgID, pairing.DCChannelID, word); err != nil {
-			return updatedChannels, err
+		if err := AddBlockedWord(sourcePlatform, sourceID, pairing.TargetPlatform, pairing.TargetID, word); err != nil {
+			return updated, err
 		}
-
-		updatedChannels++
+		updated++
 	}
 
-	return updatedChannels, nil
+	return updated, nil
 }
 
-func RemoveBlockedWord(tgID, dcChannelID, word string) (bool, error) {
+func RemoveBlockedWord(sourcePlatform, sourceID, targetPlatform, targetID, word string) (bool, error) {
 	normalizedWord := normalizeBlockedWord(word)
 	if normalizedWord == "" {
 		return false, errors.New("blocked word cannot be empty")
@@ -595,9 +594,8 @@ func RemoveBlockedWord(tgID, dcChannelID, word string) (bool, error) {
 
 	var currentWords sql.NullString
 	err := DB.QueryRow(
-		"SELECT blocked_words FROM pairings WHERE tg_chat_id = ? AND dc_channel_id = ?",
-		tgID,
-		dcChannelID,
+		"SELECT blocked_words FROM pairings WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
+		sourcePlatform, sourceID, targetPlatform, targetID,
 	).Scan(&currentWords)
 	if err != nil {
 		return false, err
@@ -609,10 +607,9 @@ func RemoveBlockedWord(tgID, dcChannelID, word string) (bool, error) {
 	}
 
 	_, err = DB.Exec(
-		"UPDATE pairings SET blocked_words = ? WHERE tg_chat_id = ? AND dc_channel_id = ?",
+		"UPDATE pairings SET blocked_words = ? WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
 		newWords,
-		tgID,
-		dcChannelID,
+		sourcePlatform, sourceID, targetPlatform, targetID,
 	)
 	if err != nil {
 		return false, err
@@ -621,8 +618,8 @@ func RemoveBlockedWord(tgID, dcChannelID, word string) (bool, error) {
 	return true, nil
 }
 
-func RemoveBlockedWordFromAllChannels(tgID, word string) (int, error) {
-	pairings, err := GetPairingsByTelegramChat(tgID)
+func RemoveBlockedWordFromAllTargets(sourcePlatform, sourceID, word string) (int, error) {
+	pairings, err := GetPairingsBySource(sourcePlatform, sourceID)
 	if err != nil {
 		return 0, err
 	}
@@ -631,31 +628,30 @@ func RemoveBlockedWordFromAllChannels(tgID, word string) (int, error) {
 		return 0, sql.ErrNoRows
 	}
 
-	removedChannels := 0
+	removedTargets := 0
 	for _, pairing := range pairings {
-		removed, err := RemoveBlockedWord(tgID, pairing.DCChannelID, word)
+		removed, err := RemoveBlockedWord(sourcePlatform, sourceID, pairing.TargetPlatform, pairing.TargetID, word)
 		if err != nil {
-			return removedChannels, err
+			return removedTargets, err
 		}
 		if removed {
-			removedChannels++
+			removedTargets++
 		}
 	}
 
-	return removedChannels, nil
+	return removedTargets, nil
 }
 
-func ClearBlockedWords(tgID, dcChannelID string) error {
+func ClearBlockedWords(sourcePlatform, sourceID, targetPlatform, targetID string) error {
 	_, err := DB.Exec(
-		"UPDATE pairings SET blocked_words = '' WHERE tg_chat_id = ? AND dc_channel_id = ?",
-		tgID,
-		dcChannelID,
+		"UPDATE pairings SET blocked_words = '' WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
+		sourcePlatform, sourceID, targetPlatform, targetID,
 	)
 	return err
 }
 
-func ClearBlockedWordsForAllChannels(tgID string) (int, error) {
-	result, err := DB.Exec("UPDATE pairings SET blocked_words = '' WHERE tg_chat_id = ?", tgID)
+func ClearBlockedWordsForAllTargets(sourcePlatform, sourceID string) (int, error) {
+	result, err := DB.Exec("UPDATE pairings SET blocked_words = '' WHERE source_platform = ? AND source_id = ?", sourcePlatform, sourceID)
 	if err != nil {
 		return 0, err
 	}
@@ -670,24 +666,6 @@ func ClearBlockedWordsForAllChannels(tgID string) (int, error) {
 	}
 
 	return int(rowsAffected), nil
-}
-
-func GetBlockedWordListsByTelegramChat(tgID string) (map[string][]string, error) {
-	pairings, err := GetPairingsByTelegramChat(tgID)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(pairings) == 0 {
-		return map[string][]string{}, nil
-	}
-
-	result := make(map[string][]string, len(pairings))
-	for _, pairing := range pairings {
-		result[pairing.DCChannelID] = pairing.BlockedWords
-	}
-
-	return result, nil
 }
 
 func normalizeBlockedWord(word string) string {
@@ -764,11 +742,13 @@ func EnqueuePendingEvent(event models.MediaEvent) (bool, error) {
 	}
 
 	event.EventID = eventID
-	event.SourceTGID = strings.TrimSpace(event.SourceTGID)
-	event.TargetDCID = strings.TrimSpace(event.TargetDCID)
+	event.SourcePlatform = strings.TrimSpace(event.SourcePlatform)
+	event.SourceID = strings.TrimSpace(event.SourceID)
+	event.TargetPlatform = strings.TrimSpace(event.TargetPlatform)
+	event.TargetID = strings.TrimSpace(event.TargetID)
 
-	if event.SourceTGID == "" || event.TargetDCID == "" {
-		return false, errors.New("source telegram id and target discord channel id are required")
+	if event.SourcePlatform == "" || event.SourceID == "" || event.TargetPlatform == "" || event.TargetID == "" {
+		return false, errors.New("source and target platform/ids are required")
 	}
 
 	payload, err := json.Marshal(event)
@@ -805,17 +785,21 @@ func EnqueuePendingEvent(event models.MediaEvent) (bool, error) {
 	result, err := tx.Exec(
 		`INSERT INTO pending_events (
 			event_id,
-			source_tg_id,
-			target_dc_channel_id,
+			source_platform,
+			source_id,
+			target_platform,
+			target_id,
 			payload,
 			available_at,
 			retry_count,
 			last_error,
 			created_at
-		) VALUES (?, ?, ?, ?, ?, 0, '', ?) ON CONFLICT(event_id) DO NOTHING`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, 0, '', ?) ON CONFLICT(event_id) DO NOTHING`,
 		eventID,
-		event.SourceTGID,
-		event.TargetDCID,
+		event.SourcePlatform,
+		event.SourceID,
+		event.TargetPlatform,
+		event.TargetID,
 		string(payload),
 		availableAt,
 		now,
@@ -853,20 +837,20 @@ func ClaimNextPendingEvent(now time.Time, lease time.Duration) (QueuedEvent, boo
 
 	var (
 		eventID    string
-		sourceTGID string
-		targetDCID string
+		sp, sid    string
+		tp, tid    string
 		payload    string
 		retryCount int
 	)
 
 	err = tx.QueryRow(
-		`SELECT event_id, source_tg_id, target_dc_channel_id, payload, retry_count
+		`SELECT event_id, source_platform, source_id, target_platform, target_id, payload, retry_count
 		 FROM pending_events
 		 WHERE available_at <= ?
 		 ORDER BY available_at ASC, created_at ASC
 		 LIMIT 1`,
 		now.Unix(),
-	).Scan(&eventID, &sourceTGID, &targetDCID, &payload, &retryCount)
+	).Scan(&eventID, &sp, &sid, &tp, &tid, &payload, &retryCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		rollback()
 		return QueuedEvent{}, false, nil
@@ -894,11 +878,17 @@ func ClaimNextPendingEvent(now time.Time, lease time.Duration) (QueuedEvent, boo
 	if strings.TrimSpace(event.EventID) == "" {
 		event.EventID = eventID
 	}
-	if strings.TrimSpace(event.SourceTGID) == "" {
-		event.SourceTGID = sourceTGID
+	if strings.TrimSpace(event.SourcePlatform) == "" {
+		event.SourcePlatform = sp
 	}
-	if strings.TrimSpace(event.TargetDCID) == "" {
-		event.TargetDCID = targetDCID
+	if strings.TrimSpace(event.SourceID) == "" {
+		event.SourceID = sid
+	}
+	if strings.TrimSpace(event.TargetPlatform) == "" {
+		event.TargetPlatform = tp
+	}
+	if strings.TrimSpace(event.TargetID) == "" {
+		event.TargetID = tid
 	}
 
 	return QueuedEvent{Event: event, RetryCount: retryCount}, true, nil
@@ -968,16 +958,16 @@ func MovePendingEventToDeadLetter(eventID, reason string) (int64, error) {
 	}
 
 	var (
-		sourceTGID string
-		targetDCID string
+		sp, sid    string
+		tp, tid    string
 		payload    string
 		retryCount int
 	)
 
 	err = tx.QueryRow(
-		"SELECT source_tg_id, target_dc_channel_id, payload, retry_count FROM pending_events WHERE event_id = ?",
+		"SELECT source_platform, source_id, target_platform, target_id, payload, retry_count FROM pending_events WHERE event_id = ?",
 		eventID,
-	).Scan(&sourceTGID, &targetDCID, &payload, &retryCount)
+	).Scan(&sp, &sid, &tp, &tid, &payload, &retryCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		rollback()
 		return 0, sql.ErrNoRows
@@ -996,17 +986,21 @@ func MovePendingEventToDeadLetter(eventID, reason string) (int64, error) {
 	result, err := tx.Exec(
 		`INSERT INTO dead_letters (
 			event_id,
-			source_tg_id,
-			target_dc_channel_id,
+			source_platform,
+			source_id,
+			target_platform,
+			target_id,
 			file_name,
 			payload,
 			retry_count,
 			failure_reason,
 			failed_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		eventID,
-		sourceTGID,
-		targetDCID,
+		sp,
+		sid,
+		tp,
+		tid,
 		event.FileName,
 		payload,
 		retryCount,
@@ -1036,7 +1030,7 @@ func MovePendingEventToDeadLetter(eventID, reason string) (int64, error) {
 	return deadLetterID, nil
 }
 
-func ListDeadLettersByChannel(dcChannelID string, limit int) ([]DeadLetter, error) {
+func ListDeadLettersByTarget(targetPlatform, targetID string, limit int) ([]DeadLetter, error) {
 	if limit <= 0 {
 		limit = 10
 	}
@@ -1045,12 +1039,13 @@ func ListDeadLettersByChannel(dcChannelID string, limit int) ([]DeadLetter, erro
 	}
 
 	rows, err := DB.Query(
-		`SELECT dead_letter_id, event_id, source_tg_id, target_dc_channel_id, file_name, retry_count, failure_reason, failed_at
+		`SELECT dead_letter_id, event_id, source_platform, source_id, target_platform, target_id, file_name, retry_count, failure_reason, failed_at
 		 FROM dead_letters
-		 WHERE target_dc_channel_id = ?
+		 WHERE target_platform = ? AND target_id = ?
 		 ORDER BY failed_at DESC
 		 LIMIT ?`,
-		dcChannelID,
+		targetPlatform,
+		targetID,
 		limit,
 	)
 	if err != nil {
@@ -1068,8 +1063,10 @@ func ListDeadLettersByChannel(dcChannelID string, limit int) ([]DeadLetter, erro
 		if err := rows.Scan(
 			&item.ID,
 			&item.EventID,
-			&item.SourceTGID,
-			&item.TargetDCID,
+			&item.SourcePlatform,
+			&item.SourceID,
+			&item.TargetPlatform,
+			&item.TargetID,
 			&item.FileName,
 			&item.RetryCount,
 			&item.FailureReason,
@@ -1089,7 +1086,7 @@ func ListDeadLettersByChannel(dcChannelID string, limit int) ([]DeadLetter, erro
 	return items, nil
 }
 
-func ReplayDeadLetter(deadLetterID int64, dcChannelID string) (bool, error) {
+func ReplayDeadLetter(deadLetterID int64, targetPlatform, targetID string) (bool, error) {
 	tx, err := DB.Begin()
 	if err != nil {
 		return false, err
@@ -1101,15 +1098,15 @@ func ReplayDeadLetter(deadLetterID int64, dcChannelID string) (bool, error) {
 
 	var (
 		eventID    string
-		sourceTGID string
-		targetDCID string
+		sp, sid    string
+		tp, tid    string
 		payload    string
 	)
 
 	err = tx.QueryRow(
-		"SELECT event_id, source_tg_id, target_dc_channel_id, payload FROM dead_letters WHERE dead_letter_id = ?",
+		"SELECT event_id, source_platform, source_id, target_platform, target_id, payload FROM dead_letters WHERE dead_letter_id = ?",
 		deadLetterID,
-	).Scan(&eventID, &sourceTGID, &targetDCID, &payload)
+	).Scan(&eventID, &sp, &sid, &tp, &tid, &payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		rollback()
 		return false, nil
@@ -1119,7 +1116,11 @@ func ReplayDeadLetter(deadLetterID int64, dcChannelID string) (bool, error) {
 		return false, err
 	}
 
-	if strings.TrimSpace(dcChannelID) != "" && targetDCID != strings.TrimSpace(dcChannelID) {
+	if strings.TrimSpace(targetPlatform) != "" && tp != strings.TrimSpace(targetPlatform) {
+		rollback()
+		return false, nil
+	}
+	if strings.TrimSpace(targetID) != "" && tid != strings.TrimSpace(targetID) {
 		rollback()
 		return false, nil
 	}
@@ -1145,21 +1146,25 @@ func ReplayDeadLetter(deadLetterID int64, dcChannelID string) (bool, error) {
 	if _, err := tx.Exec(
 		`INSERT INTO pending_events (
 			event_id,
-			source_tg_id,
-			target_dc_channel_id,
+			source_platform,
+			source_id,
+			target_platform,
+			target_id,
 			payload,
 			available_at,
 			retry_count,
 			last_error,
 			created_at
-		) VALUES (?, ?, ?, ?, ?, 0, 'replayed from dead letter', ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'replayed from dead letter', ?)
 		 ON CONFLICT(event_id) DO UPDATE SET
 			available_at = excluded.available_at,
 			retry_count = 0,
 			last_error = excluded.last_error`,
 		eventID,
-		sourceTGID,
-		targetDCID,
+		sp,
+		sid,
+		tp,
+		tid,
 		payload,
 		now,
 		now,

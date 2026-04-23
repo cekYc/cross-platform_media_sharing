@@ -96,14 +96,14 @@ This document collects all feature and product ideas for the project in one plac
 
 ## 6) Platform Expansion
 
-1. Bidirectional bridge (optional mode)
-- Discord -> Telegram forwarding with permission checks.
+- [x] 1. Bidirectional bridge (optional mode)
+	- [x] Discord -> Telegram forwarding with permission checks.
 
-2. Additional targets
-- Slack, Teams, Matrix, or generic webhook sink.
+- [x] 2. Additional targets
+	- [x] Slack, Teams, Matrix, or generic webhook sink.
 
-3. Pluggable transport layer
-- Keep Telegram/Discord adapters behind common interfaces.
+- [x] 3. Pluggable transport layer
+	- [x] Keep Telegram/Discord adapters behind common interfaces.
 
 ## 7) Security Improvements
 

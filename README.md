@@ -4,23 +4,23 @@ A Go bot that forwards media from Telegram chats to mapped Discord channels.
 
 ## Features
 
-- Telegram media forwarding to Discord attachments
-- Multi-link mapping: one Telegram chat can forward to multiple Discord channels
-- Per-channel block lists and admin command controls
+- **Pluggable Transport Layer**: Generic producer/consumer interfaces that support multiple platforms.
+- **Bidirectional Bridge**: Forward media from Telegram to Discord, OR from Discord to Telegram.
+- **Webhook Sink Integration**: Send events securely to generic JSON Webhooks with HMAC-SHA256 signature verification.
+- **Memory-Efficient Streaming**: Large attachments stream directly to platforms (e.g. via `io.Pipe`) without loading files fully into RAM.
+- **CLI Management Tool**: Securely manage pairings and Webhook secrets via a built-in command line interface without exposing secrets in chat.
+- Multi-link mapping: one source can forward to multiple targets.
+- Per-channel block lists and admin command controls.
 - **Advanced Moderation Engine**: Per-channel JSON configuration for regex filtering, sender blocks, and specific file size/MIME rules.
 - **Spam Controls & Time Rules**: Built-in burst limiting and quiet hours (queue content during quiet hours, deliver later).
 - **Rich Message Formatting**: Configurable templates (e.g. `{sender}`, `{caption}`) and automatic Reply mapping blockquotes to preserve context.
 - **Localization & Onboarding**: Multi-language support (EN/TR) for admin commands and guided `/start` onboarding in Telegram.
-- Persistent SQLite-backed delivery queue (survives restarts)
-- Delivery retry with exponential backoff and dead-letter queue
-- Idempotent event processing via deterministic event IDs
-- Album batching with collector window + inactivity timeout
-- Duplicate media suppression window per target channel
-- Safer Telegram media handling with MIME allowlists and size limits
-- Health and readiness endpoints (`/healthz`, `/readyz`)
-- Prometheus-style metrics endpoint (`/metrics`)
-- Structured JSON logs with per-event correlation IDs
-- Built-in operational alerts for failure rate, queue pressure, and reconnect streaks
+- Persistent SQLite-backed delivery queue (survives restarts).
+- Delivery retry with exponential backoff and dead-letter queue.
+- Idempotent event processing via deterministic event IDs.
+- Health and readiness endpoints (`/healthz`, `/readyz`).
+- Prometheus-style metrics endpoint (`/metrics`).
+- Structured JSON logs with per-event correlation IDs.
 
 ## Commands
 

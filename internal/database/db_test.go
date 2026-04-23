@@ -79,11 +79,13 @@ func TestPersistentQueueEnqueueClaimAckIdempotent(t *testing.T) {
 	setupQueueTestDB(t)
 
 	event := models.MediaEvent{
-		EventID:    "evt-1",
-		SourceTGID: "tg-1",
-		TargetDCID: "dc-1",
-		FileName:   "image.jpg",
-		Data:       []byte("payload"),
+		EventID:        "evt-1",
+		SourcePlatform: "telegram",
+		SourceID:       "tg-1",
+		TargetPlatform: "discord",
+		TargetID:       "dc-1",
+		FileName:       "image.jpg",
+		FileURL:        "http://example.com/image.jpg",
 	}
 
 	enqueued, err := EnqueuePendingEvent(event)
@@ -130,11 +132,13 @@ func TestDeadLetterReplayFlow(t *testing.T) {
 	setupQueueTestDB(t)
 
 	event := models.MediaEvent{
-		EventID:    "evt-dead-1",
-		SourceTGID: "tg-2",
-		TargetDCID: "dc-2",
-		FileName:   "clip.mp4",
-		Data:       []byte("video"),
+		EventID:        "evt-dead-1",
+		SourcePlatform: "telegram",
+		SourceID:       "tg-2",
+		TargetPlatform: "discord",
+		TargetID:       "dc-2",
+		FileName:       "clip.mp4",
+		FileURL:        "http://example.com/video.mp4",
 	}
 
 	enqueued, err := EnqueuePendingEvent(event)
@@ -162,15 +166,15 @@ func TestDeadLetterReplayFlow(t *testing.T) {
 		t.Fatalf("expected valid dead letter id, got %d", deadLetterID)
 	}
 
-	items, err := ListDeadLettersByChannel(event.TargetDCID, 10)
+	items, err := ListDeadLettersByTarget("discord", event.TargetID, 10)
 	if err != nil {
-		t.Fatalf("ListDeadLettersByChannel() error = %v", err)
+		t.Fatalf("ListDeadLettersByTarget() error = %v", err)
 	}
 	if len(items) != 1 {
 		t.Fatalf("dead letter list length = %d, want 1", len(items))
 	}
 
-	replayed, err := ReplayDeadLetter(deadLetterID, event.TargetDCID)
+	replayed, err := ReplayDeadLetter(deadLetterID, "discord", event.TargetID)
 	if err != nil {
 		t.Fatalf("ReplayDeadLetter() error = %v", err)
 	}
@@ -178,9 +182,9 @@ func TestDeadLetterReplayFlow(t *testing.T) {
 		t.Fatal("expected dead letter replay to succeed")
 	}
 
-	items, err = ListDeadLettersByChannel(event.TargetDCID, 10)
+	items, err = ListDeadLettersByTarget("discord", event.TargetID, 10)
 	if err != nil {
-		t.Fatalf("ListDeadLettersByChannel() after replay error = %v", err)
+		t.Fatalf("ListDeadLettersByTarget() after replay error = %v", err)
 	}
 	if len(items) != 0 {
 		t.Fatalf("dead letter list length after replay = %d, want 0", len(items))

@@ -9,11 +9,12 @@ const (
 
 type MediaEvent struct {
 	EventID        string
-	Data           []byte
 	FileName       string
 	Caption        string
-	SourceTGID     string
-	TargetDCID     string
+	SourcePlatform string
+	SourceID       string
+	TargetPlatform string
+	TargetID       string
 	MediaGroupID   string
 	MediaType      string
 	ContentType    string
@@ -21,4 +22,5 @@ type MediaEvent struct {
 	SenderName     string
 	ReplyToSender  string
 	ReplyToCaption string
+	FileURL        string // For streaming instead of loading into RAM
 }

@@ -6,7 +6,9 @@ import (
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/discord"
 	"tg-discord-bot/internal/observability"
+	"tg-discord-bot/internal/queue"
 	"tg-discord-bot/internal/telegram"
+	_ "tg-discord-bot/internal/webhook"
 
 	"github.com/joho/godotenv"
 )
@@ -30,11 +32,16 @@ func main() {
 
 	observability.Start()
 
+	// Initialize adapters
 	discord.InitBot(dcBotToken)
 	defer discord.Session.Close()
 
-	go discord.StartConsumer()
+	tgProducer := telegram.NewProducer(tgToken)
 
+	// Start generic queue processor
+	go queue.StartProcessor()
+
+	// Start Producers
 	log.Printf("[+] Telegram producer started")
-	telegram.StartProducer(tgToken)
+	tgProducer.Start() // Blocking
 }
