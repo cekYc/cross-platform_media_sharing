@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -56,142 +55,41 @@ var DB *sql.DB
 
 func InitDB() {
 	var err error
-	DB, err = sql.Open("sqlite", "bot.db")
+	// Enable WAL mode to allow concurrent reads and writes, preventing "database is locked" errors
+	DB, err = sql.Open("sqlite", "bot.db?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	if err := ensurePairingsSchema(); err != nil {
+	if err := RunMigrations(); err != nil {
 		log.Fatal("database migration failed:", err)
 	}
-
-	if err := ensureQueueSchema(); err != nil {
-		log.Fatal("queue schema migration failed:", err)
-	}
-
-	if err := ensureAuditLogSchema(); err != nil {
-		log.Fatal("audit log schema migration failed:", err)
-	}
 }
 
-func ensurePairingsSchema() error {
-	exists, err := tableExists("pairings")
-	if err != nil {
-		return err
+// splitBlockedWordsLegacy is used strictly by the v2 migration to parse old data.
+func splitBlockedWordsLegacy(words string) []string {
+	if strings.TrimSpace(words) == "" {
+		return []string{}
 	}
 
-	if !exists {
-		return createPairingsTable()
-	}
+	parts := strings.Split(words, ",")
+	result := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
 
-	legacy, err := isLegacyPairingsSchema()
-	if err != nil {
-		return err
-	}
-	if legacy {
-		if err := migrateLegacyPairingsTable(); err != nil {
-			return err
+	for _, part := range parts {
+		normalized := normalizeBlockedWord(part)
+		if normalized == "" {
+			continue
 		}
-	}
-
-	if err := ensureColumnExists("pairings", "blocked_words", "TEXT DEFAULT ''"); err != nil {
-		return err
-	}
-
-	if err := ensureColumnExists("pairings", "rule_config", "TEXT DEFAULT '{}'"); err != nil {
-		return err
-	}
-
-	if err := ensureColumnExists("pairings", "webhook_secret", "TEXT DEFAULT ''"); err != nil {
-		return err
-	}
-
-	if err := ensureIndexExists("idx_pairings_source", "pairings", "source_platform, source_id"); err != nil {
-		return err
-	}
-
-	if err := ensureIndexExists("idx_pairings_target", "pairings", "target_platform, target_id"); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func ensureQueueSchema() error {
-	queries := []string{
-		`CREATE TABLE IF NOT EXISTS pending_events (
-			event_id TEXT PRIMARY KEY,
-			source_platform TEXT NOT NULL,
-			source_id TEXT NOT NULL,
-			target_platform TEXT NOT NULL,
-			target_id TEXT NOT NULL,
-			payload TEXT NOT NULL,
-			available_at INTEGER NOT NULL,
-			retry_count INTEGER NOT NULL DEFAULT 0,
-			last_error TEXT DEFAULT '',
-			created_at INTEGER NOT NULL
-		)`,
-		"CREATE INDEX IF NOT EXISTS idx_pending_events_available_at ON pending_events(available_at)",
-		"CREATE INDEX IF NOT EXISTS idx_pending_events_target ON pending_events(target_platform, target_id)",
-		`CREATE TABLE IF NOT EXISTS processed_events (
-			event_id TEXT PRIMARY KEY,
-			processed_at INTEGER NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS dead_letters (
-			dead_letter_id INTEGER PRIMARY KEY AUTOINCREMENT,
-			event_id TEXT NOT NULL,
-			source_platform TEXT NOT NULL,
-			source_id TEXT NOT NULL,
-			target_platform TEXT NOT NULL,
-			target_id TEXT NOT NULL,
-			file_name TEXT NOT NULL,
-			payload TEXT NOT NULL,
-			retry_count INTEGER NOT NULL,
-			failure_reason TEXT NOT NULL,
-			failed_at INTEGER NOT NULL
-		)`,
-		"CREATE INDEX IF NOT EXISTS idx_dead_letters_target ON dead_letters(target_platform, target_id)",
-		"CREATE INDEX IF NOT EXISTS idx_dead_letters_failed_at ON dead_letters(failed_at)",
-	}
-
-	for _, query := range queries {
-		if _, err := DB.Exec(query); err != nil {
-			return err
+		if _, exists := seen[normalized]; exists {
+			continue
 		}
+
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
 	}
 
-	// Migrate queue legacy schema if exists
-	migrateLegacyQueueSchema()
-
-	return nil
-}
-
-func migrateLegacyQueueSchema() {
-	// simple check if source_tg_id exists
-	rows, err := DB.Query("PRAGMA table_info(pending_events)")
-	if err == nil {
-		defer rows.Close()
-		hasLegacy := false
-		for rows.Next() {
-			var cid int
-			var name string
-			var dataType string
-			var notNull int
-			var defaultValue sql.NullString
-			var pk int
-			rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk)
-			if name == "source_tg_id" {
-				hasLegacy = true
-			}
-		}
-		if hasLegacy {
-			// for simplicity of this major refactor, we just drop legacy queue items because
-			// the payload byte[] format changed anyway to FileURL.
-			DB.Exec("DROP TABLE pending_events")
-			DB.Exec("DROP TABLE dead_letters")
-			ensureQueueSchema()
-		}
-	}
+	return result
 }
 
 func tableExists(tableName string) (bool, error) {
@@ -205,207 +103,6 @@ func tableExists(tableName string) (bool, error) {
 	}
 
 	return true, nil
-}
-
-func createPairingsTable() error {
-	queries := []string{
-		`CREATE TABLE IF NOT EXISTS pairings (
-			source_platform TEXT NOT NULL,
-			source_id TEXT NOT NULL,
-			target_platform TEXT NOT NULL,
-			target_id TEXT NOT NULL,
-			blocked_words TEXT DEFAULT '',
-			rule_config TEXT DEFAULT '{}',
-			webhook_secret TEXT DEFAULT '',
-			PRIMARY KEY (source_platform, source_id, target_platform, target_id)
-		)`,
-		"CREATE INDEX IF NOT EXISTS idx_pairings_source ON pairings(source_platform, source_id)",
-		"CREATE INDEX IF NOT EXISTS idx_pairings_target ON pairings(target_platform, target_id)",
-	}
-
-	for _, query := range queries {
-		if _, err := DB.Exec(query); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func createPairingsTableTx(tx *sql.Tx) error {
-	queries := []string{
-		`CREATE TABLE pairings (
-			source_platform TEXT NOT NULL,
-			source_id TEXT NOT NULL,
-			target_platform TEXT NOT NULL,
-			target_id TEXT NOT NULL,
-			blocked_words TEXT DEFAULT '',
-			rule_config TEXT DEFAULT '{}',
-			webhook_secret TEXT DEFAULT '',
-			PRIMARY KEY (source_platform, source_id, target_platform, target_id)
-		)`,
-		"CREATE INDEX IF NOT EXISTS idx_pairings_source ON pairings(source_platform, source_id)",
-		"CREATE INDEX IF NOT EXISTS idx_pairings_target ON pairings(target_platform, target_id)",
-	}
-
-	for _, query := range queries {
-		if _, err := tx.Exec(query); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func isLegacyPairingsSchema() (bool, error) {
-	rows, err := DB.Query("PRAGMA table_info(pairings)")
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-
-	hasTGChatID := false
-	hasDCChannelID := false
-
-	for rows.Next() {
-		var cid int
-		var name string
-		var dataType string
-		var notNull int
-		var defaultValue sql.NullString
-		var pk int
-
-		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
-			return false, err
-		}
-
-		if name == "tg_chat_id" {
-			hasTGChatID = true
-		}
-		if name == "dc_channel_id" {
-			hasDCChannelID = true
-		}
-	}
-
-	return hasTGChatID && hasDCChannelID, nil
-}
-
-func migrateLegacyPairingsTable() error {
-	tx, err := DB.Begin()
-	if err != nil {
-		return err
-	}
-
-	if _, err := tx.Exec("DROP TABLE IF EXISTS pairings_legacy"); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	if _, err := tx.Exec("ALTER TABLE pairings RENAME TO pairings_legacy"); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	if err := createPairingsTableTx(tx); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	hasBlockedWords, err := tableHasColumnTx(tx, "pairings_legacy", "blocked_words")
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	hasRuleConfig, err := tableHasColumnTx(tx, "pairings_legacy", "rule_config")
-	if err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	blockedCol := "''"
-	if hasBlockedWords {
-		blockedCol = "COALESCE(blocked_words, '')"
-	}
-
-	ruleCol := "'{}'"
-	if hasRuleConfig {
-		ruleCol = "COALESCE(rule_config, '{}')"
-	}
-
-	insertQuery := fmt.Sprintf("INSERT INTO pairings (source_platform, source_id, target_platform, target_id, blocked_words, rule_config, webhook_secret) SELECT 'telegram', tg_chat_id, 'discord', dc_channel_id, %s, %s, '' FROM pairings_legacy", blockedCol, ruleCol)
-
-	if _, err := tx.Exec(insertQuery); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	if _, err := tx.Exec("DROP TABLE pairings_legacy"); err != nil {
-		tx.Rollback()
-		return err
-	}
-
-	return tx.Commit()
-}
-
-func ensureColumnExists(tableName, columnName, columnDefinition string) error {
-	rows, err := DB.Query(fmt.Sprintf("PRAGMA table_info(%s)", tableName))
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name string
-		var dataType string
-		var notNull int
-		var defaultValue sql.NullString
-		var pk int
-
-		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
-			return err
-		}
-
-		if name == columnName {
-			return nil
-		}
-	}
-
-	_, err = DB.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", tableName, columnName, columnDefinition))
-	return err
-}
-
-func ensureIndexExists(indexName, tableName, columns string) error {
-	_, err := DB.Exec(fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s(%s)", indexName, tableName, columns))
-	return err
-}
-
-func tableHasColumnTx(tx *sql.Tx, tableName, columnName string) (bool, error) {
-	rows, err := tx.Query(fmt.Sprintf("PRAGMA table_info(%s)", tableName))
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var cid int
-		var name string
-		var dataType string
-		var notNull int
-		var defaultValue sql.NullString
-		var pk int
-
-		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
-			return false, err
-		}
-
-		if name == columnName {
-			return true, nil
-		}
-	}
-
-	return false, nil
 }
 
 func LinkChannel(sourcePlatform, sourceID, targetPlatform, targetID, webhookSecret string) error {
@@ -445,7 +142,7 @@ func UnlinkChannel(sourcePlatform, sourceID, targetPlatform, targetID string) (b
 
 func GetPairingsBySource(sourcePlatform, sourceID string) ([]Pairing, error) {
 	rows, err := DB.Query(
-		"SELECT source_platform, source_id, target_platform, target_id, blocked_words, rule_config, webhook_secret FROM pairings WHERE source_platform = ? AND source_id = ? ORDER BY target_id",
+		"SELECT source_platform, source_id, target_platform, target_id, rule_config, webhook_secret FROM pairings WHERE source_platform = ? AND source_id = ? ORDER BY target_id",
 		sourcePlatform, sourceID,
 	)
 	if err != nil {
@@ -458,7 +155,7 @@ func GetPairingsBySource(sourcePlatform, sourceID string) ([]Pairing, error) {
 
 func GetPairingsByTarget(targetPlatform, targetID string) ([]Pairing, error) {
 	rows, err := DB.Query(
-		"SELECT source_platform, source_id, target_platform, target_id, blocked_words, rule_config, webhook_secret FROM pairings WHERE target_platform = ? AND target_id = ? ORDER BY source_id",
+		"SELECT source_platform, source_id, target_platform, target_id, rule_config, webhook_secret FROM pairings WHERE target_platform = ? AND target_id = ? ORDER BY source_id",
 		targetPlatform, targetID,
 	)
 	if err != nil {
@@ -471,7 +168,7 @@ func GetPairingsByTarget(targetPlatform, targetID string) ([]Pairing, error) {
 
 func GetPairing(sourcePlatform, sourceID, targetPlatform, targetID string) (Pairing, error) {
 	rows, err := DB.Query(
-		"SELECT source_platform, source_id, target_platform, target_id, blocked_words, rule_config, webhook_secret FROM pairings WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
+		"SELECT source_platform, source_id, target_platform, target_id, rule_config, webhook_secret FROM pairings WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
 		sourcePlatform, sourceID, targetPlatform, targetID,
 	)
 	if err != nil {
@@ -496,11 +193,10 @@ func scanPairings(rows *sql.Rows) ([]Pairing, error) {
 
 	for rows.Next() {
 		var sp, sid, tp, tid string
-		var blockedWords sql.NullString
 		var ruleConfigStr sql.NullString
 		var webhookSecret sql.NullString
 
-		if err := rows.Scan(&sp, &sid, &tp, &tid, &blockedWords, &ruleConfigStr, &webhookSecret); err != nil {
+		if err := rows.Scan(&sp, &sid, &tp, &tid, &ruleConfigStr, &webhookSecret); err != nil {
 			return nil, err
 		}
 
@@ -514,7 +210,6 @@ func scanPairings(rows *sql.Rows) ([]Pairing, error) {
 			SourceID:       sid,
 			TargetPlatform: tp,
 			TargetID:       tid,
-			BlockedWords:   splitBlockedWords(blockedWords),
 			RuleConfig:     ruleConfig,
 			WebhookSecret:  webhookSecret.String,
 		})
@@ -522,6 +217,15 @@ func scanPairings(rows *sql.Rows) ([]Pairing, error) {
 
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	// Fetch blocked words for each pairing efficiently
+	for i := range pairings {
+		words, err := GetBlockedWords(pairings[i].SourcePlatform, pairings[i].SourceID, pairings[i].TargetPlatform, pairings[i].TargetID)
+		if err != nil {
+			return nil, err
+		}
+		pairings[i].BlockedWords = words
 	}
 
 	return pairings, nil
@@ -542,16 +246,28 @@ func UpdateRuleConfig(sourcePlatform, sourceID, targetPlatform, targetID string,
 }
 
 func GetBlockedWords(sourcePlatform, sourceID, targetPlatform, targetID string) ([]string, error) {
-	var words sql.NullString
-	err := DB.QueryRow(
-		"SELECT blocked_words FROM pairings WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
+	rows, err := DB.Query(
+		"SELECT word FROM blocked_words WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ? ORDER BY word ASC",
 		sourcePlatform, sourceID, targetPlatform, targetID,
-	).Scan(&words)
+	)
 	if err != nil {
-		return []string{}, err
+		return nil, err
+	}
+	defer rows.Close()
+
+	var words []string
+	for rows.Next() {
+		var w string
+		if err := rows.Scan(&w); err != nil {
+			return nil, err
+		}
+		words = append(words, w)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
-	return splitBlockedWords(words), nil
+	return words, nil
 }
 
 func AddBlockedWord(sourcePlatform, sourceID, targetPlatform, targetID, word string) error {
@@ -560,21 +276,9 @@ func AddBlockedWord(sourcePlatform, sourceID, targetPlatform, targetID, word str
 		return errors.New("blocked word cannot be empty")
 	}
 
-	var currentWords sql.NullString
-	err := DB.QueryRow(
-		"SELECT blocked_words FROM pairings WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
-		sourcePlatform, sourceID, targetPlatform, targetID,
-	).Scan(&currentWords)
-	if err != nil {
-		return err
-	}
-
-	newWords := mergeBlockedWords(currentWords, normalizedWord)
-
-	_, err = DB.Exec(
-		"UPDATE pairings SET blocked_words = ? WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
-		newWords,
-		sourcePlatform, sourceID, targetPlatform, targetID,
+	_, err := DB.Exec(
+		"INSERT OR IGNORE INTO blocked_words (source_platform, source_id, target_platform, target_id, word) VALUES (?, ?, ?, ?, ?)",
+		sourcePlatform, sourceID, targetPlatform, targetID, normalizedWord,
 	)
 	return err
 }
@@ -606,66 +310,54 @@ func RemoveBlockedWord(sourcePlatform, sourceID, targetPlatform, targetID, word 
 		return false, errors.New("blocked word cannot be empty")
 	}
 
-	var currentWords sql.NullString
-	err := DB.QueryRow(
-		"SELECT blocked_words FROM pairings WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
-		sourcePlatform, sourceID, targetPlatform, targetID,
-	).Scan(&currentWords)
-	if err != nil {
-		return false, err
-	}
-
-	newWords, removed := removeBlockedWord(currentWords, normalizedWord)
-	if !removed {
-		return false, nil
-	}
-
-	_, err = DB.Exec(
-		"UPDATE pairings SET blocked_words = ? WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
-		newWords,
-		sourcePlatform, sourceID, targetPlatform, targetID,
+	result, err := DB.Exec(
+		"DELETE FROM blocked_words WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ? AND word = ?",
+		sourcePlatform, sourceID, targetPlatform, targetID, normalizedWord,
 	)
 	if err != nil {
 		return false, err
 	}
 
-	return true, nil
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+
+	return rowsAffected > 0, nil
 }
 
 func RemoveBlockedWordFromAllTargets(sourcePlatform, sourceID, word string) (int, error) {
-	pairings, err := GetPairingsBySource(sourcePlatform, sourceID)
+	normalizedWord := normalizeBlockedWord(word)
+	if normalizedWord == "" {
+		return 0, errors.New("blocked word cannot be empty")
+	}
+
+	result, err := DB.Exec(
+		"DELETE FROM blocked_words WHERE source_platform = ? AND source_id = ? AND word = ?",
+		sourcePlatform, sourceID, normalizedWord,
+	)
 	if err != nil {
 		return 0, err
 	}
 
-	if len(pairings) == 0 {
-		return 0, sql.ErrNoRows
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
 	}
 
-	removedTargets := 0
-	for _, pairing := range pairings {
-		removed, err := RemoveBlockedWord(sourcePlatform, sourceID, pairing.TargetPlatform, pairing.TargetID, word)
-		if err != nil {
-			return removedTargets, err
-		}
-		if removed {
-			removedTargets++
-		}
-	}
-
-	return removedTargets, nil
+	return int(rowsAffected), nil
 }
 
 func ClearBlockedWords(sourcePlatform, sourceID, targetPlatform, targetID string) error {
 	_, err := DB.Exec(
-		"UPDATE pairings SET blocked_words = '' WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
+		"DELETE FROM blocked_words WHERE source_platform = ? AND source_id = ? AND target_platform = ? AND target_id = ?",
 		sourcePlatform, sourceID, targetPlatform, targetID,
 	)
 	return err
 }
 
 func ClearBlockedWordsForAllTargets(sourcePlatform, sourceID string) (int, error) {
-	result, err := DB.Exec("UPDATE pairings SET blocked_words = '' WHERE source_platform = ? AND source_id = ?", sourcePlatform, sourceID)
+	result, err := DB.Exec("DELETE FROM blocked_words WHERE source_platform = ? AND source_id = ?", sourcePlatform, sourceID)
 	if err != nil {
 		return 0, err
 	}
@@ -684,69 +376,6 @@ func ClearBlockedWordsForAllTargets(sourcePlatform, sourceID string) (int, error
 
 func normalizeBlockedWord(word string) string {
 	return strings.ToLower(strings.TrimSpace(word))
-}
-
-func splitBlockedWords(words sql.NullString) []string {
-	if !words.Valid || strings.TrimSpace(words.String) == "" {
-		return []string{}
-	}
-
-	parts := strings.Split(words.String, ",")
-	result := make([]string, 0, len(parts))
-	seen := make(map[string]struct{}, len(parts))
-
-	for _, part := range parts {
-		normalized := normalizeBlockedWord(part)
-		if normalized == "" {
-			continue
-		}
-		if _, exists := seen[normalized]; exists {
-			continue
-		}
-
-		seen[normalized] = struct{}{}
-		result = append(result, normalized)
-	}
-
-	return result
-}
-
-func mergeBlockedWords(existing sql.NullString, word string) string {
-	normalizedWord := normalizeBlockedWord(word)
-	existingWords := splitBlockedWords(existing)
-	if normalizedWord == "" {
-		return strings.Join(existingWords, ",")
-	}
-
-	for _, existingWord := range existingWords {
-		if existingWord == normalizedWord {
-			return strings.Join(existingWords, ",")
-		}
-	}
-
-	existingWords = append(existingWords, normalizedWord)
-	return strings.Join(existingWords, ",")
-}
-
-func removeBlockedWord(existing sql.NullString, word string) (string, bool) {
-	normalizedWord := normalizeBlockedWord(word)
-	if normalizedWord == "" {
-		return strings.Join(splitBlockedWords(existing), ","), false
-	}
-
-	existingWords := splitBlockedWords(existing)
-	filteredWords := make([]string, 0, len(existingWords))
-	removed := false
-
-	for _, existingWord := range existingWords {
-		if existingWord == normalizedWord {
-			removed = true
-			continue
-		}
-		filteredWords = append(filteredWords, existingWord)
-	}
-
-	return strings.Join(filteredWords, ","), removed
 }
 
 func EnqueuePendingEvent(event models.MediaEvent) (bool, error) {
@@ -1217,6 +846,57 @@ func GetQueueStats() (int, int, error) {
 	}
 
 	return queueDepth, retries, nil
+}
+
+// ---- Event History ----
+
+type EventHistoryEntry struct {
+	ID        int64
+	EventID   string
+	Status    string
+	Details   string
+	CreatedAt time.Time
+}
+
+// InsertEventHistory records a status transition for an event.
+func InsertEventHistory(eventID, status, details string) error {
+	_, err := DB.Exec(
+		"INSERT INTO event_history (event_id, status, details, created_at) VALUES (?, ?, ?, ?)",
+		strings.TrimSpace(eventID),
+		strings.TrimSpace(status),
+		strings.TrimSpace(details),
+		time.Now().Unix(),
+	)
+	return err
+}
+
+// GetEventHistory retrieves the lifecycle log of a specific event.
+func GetEventHistory(eventID string) ([]EventHistoryEntry, error) {
+	rows, err := DB.Query(
+		"SELECT id, event_id, status, details, created_at FROM event_history WHERE event_id = ? ORDER BY created_at ASC",
+		eventID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]EventHistoryEntry, 0)
+	for rows.Next() {
+		var entry EventHistoryEntry
+		var createdAt int64
+		if err := rows.Scan(&entry.ID, &entry.EventID, &entry.Status, &entry.Details, &createdAt); err != nil {
+			return nil, err
+		}
+		entry.CreatedAt = time.Unix(createdAt, 0)
+		entries = append(entries, entry)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return entries, nil
 }
 
 // ---- Audit Trail ----

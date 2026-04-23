@@ -125,16 +125,16 @@ This document collects all feature and product ideas for the project in one plac
 
 ## 8) Data and Schema Improvements
 
-1. Normalize blocked words
+- [x] 1. Normalize blocked words
 - Move from comma-separated text to a separate table.
 
-2. Versioned migrations
+- [x] 2. Versioned migrations
 - Introduce migration files and a schema version table.
 
-3. Event history
+- [x] 3. Event history
 - Optional lightweight event log for debug/replay.
 
-4. Retention policy
+- [x] 4. Retention policy
 - Auto-clean old logs and dead-letter records.
 
 ## 9) Testing and Quality

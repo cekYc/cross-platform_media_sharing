@@ -85,8 +85,13 @@ func handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				SenderName:     senderName,
 			}
 
-			database.EnqueuePendingEvent(event)
-			observability.RegisterEventEnqueued()
+			enqueued, _ := database.EnqueuePendingEvent(event)
+			if enqueued {
+				observability.RegisterEventEnqueued()
+				database.InsertEventHistory(event.EventID, "enqueued", "event added to processing queue")
+			} else {
+				database.InsertEventHistory(event.EventID, "skipped", "duplicate event detected")
+			}
 		}
 	}
 
@@ -111,8 +116,13 @@ func handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 				SenderName:     senderName,
 			}
 
-			database.EnqueuePendingEvent(event)
-			observability.RegisterEventEnqueued()
+			enqueued, _ := database.EnqueuePendingEvent(event)
+			if enqueued {
+				observability.RegisterEventEnqueued()
+				database.InsertEventHistory(event.EventID, "enqueued", "text event added to processing queue")
+			} else {
+				database.InsertEventHistory(event.EventID, "skipped", "duplicate text event detected")
+			}
 		}
 	}
 }

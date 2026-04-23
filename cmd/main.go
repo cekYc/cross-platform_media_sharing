@@ -10,6 +10,8 @@ import (
 	"tg-discord-bot/internal/telegram"
 	_ "tg-discord-bot/internal/webhook"
 
+	"time"
+
 	"github.com/joho/godotenv"
 )
 
@@ -40,6 +42,16 @@ func main() {
 
 	// Start generic queue processor
 	go queue.StartProcessor()
+
+	// Start background retention worker
+	go func() {
+		database.RunRetentionCleanup() // Run once on startup
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			database.RunRetentionCleanup()
+		}
+	}()
 
 	// Start Producers
 	log.Printf("[+] Telegram producer started")

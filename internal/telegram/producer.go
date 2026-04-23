@@ -123,6 +123,7 @@ func (p *Producer) Start() {
 					"source_id": chatStringID,
 					"target_id": pairing.TargetID,
 				})
+				// Cannot easily log EventHistory here without eventID, but we drop it silently.
 				continue
 			}
 			if !rules.EvaluateFileRule(pairing.RuleConfig, fileSize, declaredContentType) {
@@ -179,6 +180,7 @@ func (p *Producer) Start() {
 					"target_id": pairing.TargetID,
 					"file_name": fileName,
 				})
+				database.InsertEventHistory(event.EventID, "skipped", "duplicate event detected")
 				continue
 			}
 
@@ -188,6 +190,7 @@ func (p *Producer) Start() {
 				"target_id": pairing.TargetID,
 				"file_name": fileName,
 			})
+			database.InsertEventHistory(event.EventID, "enqueued", "event added to processing queue")
 		}
 	}
 }

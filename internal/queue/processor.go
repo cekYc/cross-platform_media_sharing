@@ -96,6 +96,7 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 			"target_id": event.TargetID,
 			"file_name": event.FileName,
 		})
+		database.InsertEventHistory(event.EventID, "filtered", "filtered by keyword rules")
 		ackEvent(event.EventID)
 		return
 	}
@@ -107,6 +108,7 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 		observability.LogEvent("warn", "destination rate limit exceeded, backing off", event.EventID, map[string]interface{}{
 			"dest_key": destKey,
 		})
+		database.InsertEventHistory(event.EventID, "rate_limited", fmt.Sprintf("destination rate limited: %s", destKey))
 		if err := database.ReschedulePendingEvent(event.EventID, queuedEvent.RetryCount, time.Now().Add(5*time.Second), "rate limited"); err != nil {
 			observability.LogEvent("error", "failed to reschedule rate-limited event", event.EventID, map[string]interface{}{"error": err.Error()})
 		}
@@ -134,6 +136,7 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 	}
 
 	ackEvent(event.EventID)
+	database.InsertEventHistory(event.EventID, "delivered", "event successfully delivered")
 	observability.RegisterEventsForwarded(1)
 	observability.LogEvent("info", "event forwarded", event.EventID, map[string]interface{}{
 		"source_id": event.SourceID,
@@ -197,6 +200,7 @@ func handleDeliveryFailure(queuedEvent database.QueuedEvent, reason string) {
 	}
 
 	if nextRetry > maxDeliveryRetries {
+		database.InsertEventHistory(queuedEvent.Event.EventID, "dead_letter", fmt.Sprintf("max retries exceeded: %s", reason))
 		deadLetterID, err := database.MovePendingEventToDeadLetter(queuedEvent.Event.EventID, reason)
 		if err != nil {
 			observability.LogEvent("error", "failed to move event to dead-letter queue", queuedEvent.Event.EventID, map[string]interface{}{
@@ -216,6 +220,7 @@ func handleDeliveryFailure(queuedEvent database.QueuedEvent, reason string) {
 	}
 	nextAvailableAt := time.Now().Add(backoff)
 
+	database.InsertEventHistory(queuedEvent.Event.EventID, "retry", fmt.Sprintf("delivery failed, scheduling retry %d: %s", nextRetry, reason))
 	if err := database.ReschedulePendingEvent(queuedEvent.Event.EventID, nextRetry, nextAvailableAt, reason); err != nil {
 		observability.LogEvent("error", "failed to reschedule event", queuedEvent.Event.EventID, map[string]interface{}{
 			"error": err.Error(),
