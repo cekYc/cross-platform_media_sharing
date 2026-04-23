@@ -131,7 +131,11 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 func containsBlockedWord(text string, words []string) bool {
 	lowerText := strings.ToLower(text)
 	for _, word := range words {
-		if strings.Contains(lowerText, word) {
+		trimmedWord := strings.ToLower(strings.TrimSpace(word))
+		if trimmedWord == "" {
+			continue
+		}
+		if strings.Contains(lowerText, trimmedWord) {
 			return true
 		}
 	}
