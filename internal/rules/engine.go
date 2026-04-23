@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"tg-discord-bot/internal/models"
+	"tg-discord-bot/internal/security"
 )
 
 var (
@@ -52,6 +53,8 @@ func EvaluateFilterRule(config models.RuleConfig, caption string, senderID strin
 
 // EvaluateFileRule returns true if the file satisfies per-chat limitations.
 func EvaluateFileRule(config models.RuleConfig, fileSize int64, contentType string) bool {
+	config = security.ApplyFileRuleDefaults(config)
+
 	fileSizeMB := int(fileSize / (1024 * 1024))
 	if config.MaxFileSizeMB > 0 && fileSizeMB > config.MaxFileSizeMB {
 		return false

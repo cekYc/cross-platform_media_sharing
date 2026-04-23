@@ -15,6 +15,9 @@ A Go bot that forwards media from Telegram chats to mapped Discord channels.
 - **Spam Controls & Time Rules**: Built-in burst limiting and quiet hours (queue content during quiet hours, deliver later).
 - **Rich Message Formatting**: Configurable templates (e.g. `{sender}`, `{caption}`) and automatic Reply mapping blockquotes to preserve context.
 - **Localization & Onboarding**: Multi-language support (EN/TR) for admin commands and guided `/start` onboarding in Telegram.
+- Built-in rate limiting per source chat and destination channel.
+- Audit trail logging to track who modified pairings or configurations.
+- Token masking in logs and support for loading secrets via `_FILE` for enhanced security.
 - Persistent SQLite-backed delivery queue (survives restarts).
 - Delivery retry with exponential backoff and dead-letter queue.
 - Idempotent event processing via deterministic event IDs.
@@ -48,23 +51,30 @@ Discord commands:
 - `!deadletters [limit]`: Inspect failed deliveries for this channel
 - `!replaydead <dead_letter_id>`: Replay a dead-letter item
 - `!setrule <telegram_chat_id> <json>`: Set advanced rules (JSON format)
+- `!auditlog [limit]`: Show recent admin action history
 - `!help`: Show command help
 
 ## Environment Variables
 
 Required:
 
-- `TELEGRAM_BOT_TOKEN`
-- `DISCORD_BOT_TOKEN`
+- `TELEGRAM_BOT_TOKEN` (or `TELEGRAM_BOT_TOKEN_FILE` to read from file)
+- `DISCORD_BOT_TOKEN` (or `DISCORD_BOT_TOKEN_FILE` to read from file)
 
 Optional:
 
 - `DISCORD_ADMIN_ROLE_IDS` (comma-separated role IDs with bridge admin access)
+- `DISCORD_TRUSTED_USER_IDS` (comma-separated Discord user IDs explicitly allowed to run admin commands)
+- `TELEGRAM_TRUSTED_USER_IDS` (comma-separated Telegram user IDs explicitly allowed to run admin commands)
 - `DUPLICATE_WINDOW_SECONDS` (default: `600`)
 - `QUEUE_POLL_MILLISECONDS` (default: `250`)
 - `QUEUE_PROCESSING_LEASE_SECONDS` (default: `30`)
 - `DELIVERY_MAX_RETRIES` (default: `5`)
 - `DELIVERY_RETRY_BASE_SECONDS` (default: `2`)
+- `RATE_LIMIT_SOURCE_MAX` (default: `30`)
+- `RATE_LIMIT_SOURCE_WINDOW_SECONDS` (default: `60`)
+- `RATE_LIMIT_DEST_MAX` (default: `60`)
+- `RATE_LIMIT_DEST_WINDOW_SECONDS` (default: `60`)
 - `OBSERVABILITY_HTTP_ENABLED` (default: `true`)
 - `OBSERVABILITY_HTTP_ADDR` (default: `:8081`)
 - `READY_CONSUMER_STALE_SECONDS` (default: `30`)
@@ -109,3 +119,4 @@ Stored tables include:
 - Pending delivery queue
 - Processed event IDs (idempotency)
 - Dead-letter deliveries
+- Audit log (`audit_log` table)

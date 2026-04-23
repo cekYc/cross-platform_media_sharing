@@ -7,6 +7,7 @@ import (
 	"tg-discord-bot/internal/models"
 	"tg-discord-bot/internal/observability"
 	"tg-discord-bot/internal/rules"
+	"tg-discord-bot/internal/security"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -23,6 +24,15 @@ func handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	}
 
 	sourceID := m.ChannelID
+
+	// Source rate limit check
+	sourceKey := "discord:" + sourceID
+	if !security.CheckSourceRateLimit(sourceKey) {
+		observability.Log("warn", "source rate limit exceeded", map[string]interface{}{
+			"source_key": sourceKey,
+		})
+		return
+	}
 
 	pairings, err := database.GetPairingsBySource("discord", sourceID)
 	if err != nil || len(pairings) == 0 {

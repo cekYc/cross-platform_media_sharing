@@ -226,4 +226,38 @@ func setupQueueTestDB(t *testing.T) {
 	if err := ensureQueueSchema(); err != nil {
 		t.Fatalf("ensureQueueSchema() error = %v", err)
 	}
+
+	if err := ensureAuditLogSchema(); err != nil {
+		t.Fatalf("ensureAuditLogSchema() error = %v", err)
+	}
+}
+
+func TestAuditLogInsertAndList(t *testing.T) {
+	setupQueueTestDB(t)
+
+	if err := InsertAuditLog("link", "discord", "user-1", "linked tg:-100 to dc:999"); err != nil {
+		t.Fatalf("InsertAuditLog() error = %v", err)
+	}
+
+	if err := InsertAuditLog("unlink", "telegram", "user-2", "unlinked tg:-100 from dc:999"); err != nil {
+		t.Fatalf("InsertAuditLog() error = %v", err)
+	}
+
+	entries, err := ListAuditLogs(10)
+	if err != nil {
+		t.Fatalf("ListAuditLogs() error = %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("expected 2 audit entries, got %d", len(entries))
+	}
+
+	// Most recent first
+	if entries[0].Action != "unlink" {
+		t.Fatalf("expected first entry to be 'unlink', got %q", entries[0].Action)
+	}
+
+	if entries[1].ActorPlatform != "discord" {
+		t.Fatalf("expected second entry actor_platform 'discord', got %q", entries[1].ActorPlatform)
+	}
 }

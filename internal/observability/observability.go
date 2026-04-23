@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"tg-discord-bot/internal/database"
+	"tg-discord-bot/internal/security"
 	"time"
 )
 
@@ -109,14 +110,19 @@ func Log(level, message string, fields map[string]interface{}) {
 	entry := map[string]interface{}{
 		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
 		"level":     strings.ToLower(strings.TrimSpace(level)),
-		"message":   message,
+		"message":   security.MaskSecrets(message),
 	}
 
 	for key, value := range fields {
 		if strings.TrimSpace(key) == "" {
 			continue
 		}
-		entry[key] = value
+		// Mask token-like values to prevent accidental secret leaks in logs
+		if strVal, ok := value.(string); ok {
+			entry[key] = security.MaskSecrets(strVal)
+		} else {
+			entry[key] = value
+		}
 	}
 
 	payload, err := json.Marshal(entry)

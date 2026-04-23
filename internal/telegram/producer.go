@@ -4,18 +4,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/i18n"
 	"tg-discord-bot/internal/models"
 	"tg-discord-bot/internal/observability"
 	"tg-discord-bot/internal/rules"
+	"tg-discord-bot/internal/security"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 var botInstance *tgbotapi.BotAPI
+var trustedTelegramUserIDs = map[string]struct{}{}
 
 type Producer struct {
 	token string
@@ -31,6 +34,14 @@ func (p *Producer) Start() {
 		log.Fatalf("failed to initialize Telegram bot: %v", err)
 	}
 	botInstance = bot
+
+	// Parse trusted user IDs from env
+	for _, id := range strings.Split(os.Getenv("TELEGRAM_TRUSTED_USER_IDS"), ",") {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			trustedTelegramUserIDs[id] = struct{}{}
+		}
+	}
 
 	observability.Log("info", "telegram producer initialized", map[string]interface{}{})
 
@@ -52,6 +63,15 @@ func (p *Producer) Start() {
 
 		fileID, fileName, mediaType, fileSize, declaredContentType := extractMediaMetadata(update.Message)
 		if fileID == "" {
+			continue
+		}
+
+		// Source rate limit check
+		sourceKey := "telegram:" + chatStringID
+		if !security.CheckSourceRateLimit(sourceKey) {
+			observability.Log("warn", "source rate limit exceeded", map[string]interface{}{
+				"source_key": sourceKey,
+			})
 			continue
 		}
 
@@ -209,9 +229,26 @@ func extractMediaMetadata(message *tgbotapi.Message) (string, string, string, in
 	return "", "", "", 0, ""
 }
 
+// isAuthorizedTelegramUser checks if a Telegram user is trusted for admin commands.
+// Admin-only commands (block, unblock, clearblocks, setrule) require trusted user status or
+// a chat admin role. Read-only commands (id, help, start, status) are available to everyone.
+func isAuthorizedTelegramUser(userID string) bool {
+	// If no trusted user list is configured, allow all (backward compatible)
+	if len(trustedTelegramUserIDs) == 0 {
+		return true
+	}
+	_, trusted := trustedTelegramUserIDs[userID]
+	return trusted
+}
+
 func handleCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message, chatStringID string) {
 	command := strings.ToLower(message.Command())
 	args := strings.TrimSpace(message.CommandArguments())
+
+	senderID := ""
+	if message.From != nil {
+		senderID = fmt.Sprintf("%d", message.From.ID)
+	}
 
 	switch command {
 	case "id", "chatid":
@@ -222,15 +259,31 @@ func handleCommand(bot *tgbotapi.BotAPI, message *tgbotapi.Message, chatStringID
 	case "status":
 		handleStatusCommand(bot, message.Chat.ID, chatStringID)
 	case "block":
-		handleBlockCommand(bot, message.Chat.ID, chatStringID, args)
+		if !isAuthorizedTelegramUser(senderID) {
+			sendTelegramText(bot, message.Chat.ID, "❌ You do not have permission to use this command.")
+			return
+		}
+		handleBlockCommand(bot, message.Chat.ID, chatStringID, args, senderID)
 	case "blocklist":
 		handleBlocklistCommand(bot, message.Chat.ID, chatStringID, args)
 	case "unblock":
-		handleUnblockCommand(bot, message.Chat.ID, chatStringID, args)
+		if !isAuthorizedTelegramUser(senderID) {
+			sendTelegramText(bot, message.Chat.ID, "❌ You do not have permission to use this command.")
+			return
+		}
+		handleUnblockCommand(bot, message.Chat.ID, chatStringID, args, senderID)
 	case "clearblocks":
-		handleClearBlocksCommand(bot, message.Chat.ID, chatStringID, args)
+		if !isAuthorizedTelegramUser(senderID) {
+			sendTelegramText(bot, message.Chat.ID, "❌ You do not have permission to use this command.")
+			return
+		}
+		handleClearBlocksCommand(bot, message.Chat.ID, chatStringID, args, senderID)
 	case "setrule":
-		handleSetRuleCommand(bot, message.Chat.ID, chatStringID, args)
+		if !isAuthorizedTelegramUser(senderID) {
+			sendTelegramText(bot, message.Chat.ID, "❌ You do not have permission to use this command.")
+			return
+		}
+		handleSetRuleCommand(bot, message.Chat.ID, chatStringID, args, senderID)
 	case "start":
 		msg := tgbotapi.NewMessage(message.Chat.ID, i18n.Get("en", "welcome_step1")+"\n\n"+fmt.Sprintf(i18n.Get("en", "welcome_step2"), chatStringID))
 		msg.ParseMode = "Markdown"
@@ -271,7 +324,7 @@ func handleStatusCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID string) {
 	sendTelegramText(bot, chatID, "Linked targets:\n"+strings.Join(lines, "\n"))
 }
 
-func handleBlockCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args string) {
+func handleBlockCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args, actorID string) {
 	pairings, err := database.GetPairingsBySource("telegram", tgChatID)
 	if err != nil {
 		sendTelegramText(bot, chatID, "❌ Failed to load links for /block.")
@@ -302,6 +355,7 @@ func handleBlockCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args strin
 			sendTelegramText(bot, chatID, "❌ Failed to update block list.")
 			return
 		}
+		database.InsertAuditLog("block", "telegram", actorID, fmt.Sprintf("added '%s' to telegram:%s->%s:%s", word, tgChatID, targetPlatform, targetID))
 		sendTelegramText(bot, chatID, fmt.Sprintf("✅ Added to block list for `%s`: `%s`", targetID, word))
 		return
 	}
@@ -311,6 +365,7 @@ func handleBlockCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args strin
 		sendTelegramText(bot, chatID, "❌ Failed to update block list.")
 		return
 	}
+	database.InsertAuditLog("block", "telegram", actorID, fmt.Sprintf("added '%s' to all targets of telegram:%s (%d targets)", word, tgChatID, updated))
 	sendTelegramText(bot, chatID, fmt.Sprintf("✅ Added to block list for %d linked target(s): `%s`", updated, word))
 }
 
@@ -354,7 +409,7 @@ func handleBlocklistCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args s
 	sendTelegramText(bot, chatID, "Block list by target:\n"+strings.Join(lines, "\n"))
 }
 
-func handleUnblockCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args string) {
+func handleUnblockCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args, actorID string) {
 	pairings, _ := database.GetPairingsBySource("telegram", tgChatID)
 	if len(pairings) == 0 {
 		sendTelegramText(bot, chatID, "ℹ️ No linked targets found.")
@@ -376,15 +431,17 @@ func handleUnblockCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args str
 			}
 		}
 		database.RemoveBlockedWord("telegram", tgChatID, targetPlatform, targetID, word)
+		database.InsertAuditLog("unblock", "telegram", actorID, fmt.Sprintf("removed '%s' from telegram:%s->%s:%s", word, tgChatID, targetPlatform, targetID))
 		sendTelegramText(bot, chatID, fmt.Sprintf("✅ Removed `%s` from `%s`.", word, targetID))
 		return
 	}
 
 	removed, _ := database.RemoveBlockedWordFromAllTargets("telegram", tgChatID, word)
+	database.InsertAuditLog("unblock", "telegram", actorID, fmt.Sprintf("removed '%s' from all targets of telegram:%s (%d targets)", word, tgChatID, removed))
 	sendTelegramText(bot, chatID, fmt.Sprintf("✅ Removed `%s` from %d linked target(s).", word, removed))
 }
 
-func handleClearBlocksCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args string) {
+func handleClearBlocksCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args, actorID string) {
 	pairings, _ := database.GetPairingsBySource("telegram", tgChatID)
 	if len(pairings) == 0 {
 		sendTelegramText(bot, chatID, "ℹ️ No linked targets found.")
@@ -401,15 +458,17 @@ func handleClearBlocksCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args
 			}
 		}
 		database.ClearBlockedWords("telegram", tgChatID, targetPlatform, targetID)
+		database.InsertAuditLog("clearblocks", "telegram", actorID, fmt.Sprintf("cleared blocks for telegram:%s->%s:%s", tgChatID, targetPlatform, targetID))
 		sendTelegramText(bot, chatID, fmt.Sprintf("✅ Cleared block list for `%s`.", targetID))
 		return
 	}
 
 	cleared, _ := database.ClearBlockedWordsForAllTargets("telegram", tgChatID)
+	database.InsertAuditLog("clearblocks", "telegram", actorID, fmt.Sprintf("cleared blocks for all targets of telegram:%s (%d targets)", tgChatID, cleared))
 	sendTelegramText(bot, chatID, fmt.Sprintf("✅ Cleared block list for %d linked target(s).", cleared))
 }
 
-func handleSetRuleCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args string) {
+func handleSetRuleCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args, actorID string) {
 	parts := strings.SplitN(strings.TrimSpace(args), " ", 2)
 	if len(parts) < 2 {
 		sendTelegramText(bot, chatID, "Usage: /setrule <target_id> <json_string>")
@@ -446,6 +505,8 @@ func handleSetRuleCommand(bot *tgbotapi.BotAPI, chatID int64, tgChatID, args str
 		sendTelegramText(bot, chatID, "❌ Failed to update rules.")
 		return
 	}
+
+	database.InsertAuditLog("setrule", "telegram", actorID, fmt.Sprintf("updated rules for telegram:%s->%s:%s", tgChatID, targetPlatform, targetID))
 
 	sendTelegramText(bot, chatID, fmt.Sprintf("✅ Successfully updated rules for `%s`.", targetID))
 }

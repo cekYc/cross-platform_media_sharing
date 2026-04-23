@@ -11,6 +11,7 @@ import (
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/models"
 	"tg-discord-bot/internal/observability"
+	"tg-discord-bot/internal/security"
 	"tg-discord-bot/internal/transport"
 )
 
@@ -96,6 +97,19 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 			"file_name": event.FileName,
 		})
 		ackEvent(event.EventID)
+		return
+	}
+
+	// Destination rate limit check
+	destKey := event.TargetPlatform + ":" + event.TargetID
+	if !security.CheckDestinationRateLimit(destKey) {
+		// Delay delivery by a few seconds to back off
+		observability.LogEvent("warn", "destination rate limit exceeded, backing off", event.EventID, map[string]interface{}{
+			"dest_key": destKey,
+		})
+		if err := database.ReschedulePendingEvent(event.EventID, queuedEvent.RetryCount, time.Now().Add(5*time.Second), "rate limited"); err != nil {
+			observability.LogEvent("error", "failed to reschedule rate-limited event", event.EventID, map[string]interface{}{"error": err.Error()})
+		}
 		return
 	}
 

@@ -107,21 +107,21 @@ This document collects all feature and product ideas for the project in one plac
 
 ## 7) Security Improvements
 
-1. Secret hygiene
-- Support loading tokens from secret managers.
-- Never log token-like values.
+- [x] 1. Secret hygiene
+- Support loading tokens from secret managers (via `_FILE` env variables).
+- Never log token-like values (automatically masked via `security.MaskSecrets`).
 
-2. Access control hardening
-- Restrict link/unlink actions to trusted users.
+- [x] 2. Access control hardening
+- Restrict link/unlink actions to trusted users (via `TRUSTED_USER_IDS` env variables).
 
-3. Audit trail
-- Record who changed pairings/filters and when.
+- [x] 3. Audit trail
+- Record who changed pairings/filters and when in `audit_log` table. Available via `!auditlog` command.
 
-4. Safer defaults
-- Conservative size/type limits enabled by default.
+- [x] 4. Safer defaults
+- Conservative size/type limits enabled by default (50MB max, safe mime types).
 
-5. Abuse safeguards
-- Rate limits per source chat and per destination channel.
+- [x] 5. Abuse safeguards
+- Rate limits per source chat and per destination channel (adjustable sliding window).
 
 ## 8) Data and Schema Improvements
 

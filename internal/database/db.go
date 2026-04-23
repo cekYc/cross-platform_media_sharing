@@ -42,6 +42,16 @@ type DeadLetter struct {
 	FailedAt       time.Time
 }
 
+// AuditEntry records an administrative change for the audit trail.
+type AuditEntry struct {
+	ID            int64
+	Action        string
+	ActorPlatform string
+	ActorID       string
+	Details       string
+	CreatedAt     time.Time
+}
+
 var DB *sql.DB
 
 func InitDB() {
@@ -57,6 +67,10 @@ func InitDB() {
 
 	if err := ensureQueueSchema(); err != nil {
 		log.Fatal("queue schema migration failed:", err)
+	}
+
+	if err := ensureAuditLogSchema(); err != nil {
+		log.Fatal("audit log schema migration failed:", err)
 	}
 }
 
@@ -1203,4 +1217,72 @@ func GetQueueStats() (int, int, error) {
 	}
 
 	return queueDepth, retries, nil
+}
+
+// ---- Audit Trail ----
+
+func ensureAuditLogSchema() error {
+	_, err := DB.Exec(`CREATE TABLE IF NOT EXISTS audit_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		action TEXT NOT NULL,
+		actor_platform TEXT NOT NULL,
+		actor_id TEXT NOT NULL,
+		details TEXT DEFAULT '',
+		created_at INTEGER NOT NULL
+	)`)
+	if err != nil {
+		return err
+	}
+	_, err = DB.Exec("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
+	return err
+}
+
+// InsertAuditLog records an administrative action.
+func InsertAuditLog(action, actorPlatform, actorID, details string) error {
+	_, err := DB.Exec(
+		"INSERT INTO audit_log (action, actor_platform, actor_id, details, created_at) VALUES (?, ?, ?, ?, ?)",
+		strings.TrimSpace(action),
+		strings.TrimSpace(actorPlatform),
+		strings.TrimSpace(actorID),
+		strings.TrimSpace(details),
+		time.Now().Unix(),
+	)
+	return err
+}
+
+// ListAuditLogs returns the most recent audit entries.
+func ListAuditLogs(limit int) ([]AuditEntry, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	rows, err := DB.Query(
+		`SELECT id, action, actor_platform, actor_id, details, created_at
+		 FROM audit_log ORDER BY created_at DESC LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]AuditEntry, 0)
+	for rows.Next() {
+		var entry AuditEntry
+		var createdAt int64
+		if err := rows.Scan(&entry.ID, &entry.Action, &entry.ActorPlatform, &entry.ActorID, &entry.Details, &createdAt); err != nil {
+			return nil, err
+		}
+		entry.CreatedAt = time.Unix(createdAt, 0)
+		entries = append(entries, entry)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return entries, nil
 }

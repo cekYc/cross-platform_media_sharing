@@ -2,11 +2,11 @@ package main
 
 import (
 	"log"
-	"os"
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/discord"
 	"tg-discord-bot/internal/observability"
 	"tg-discord-bot/internal/queue"
+	"tg-discord-bot/internal/security"
 	"tg-discord-bot/internal/telegram"
 	_ "tg-discord-bot/internal/webhook"
 
@@ -18,8 +18,8 @@ func main() {
 		log.Println("[WARN] .env file not found, falling back to process environment variables")
 	}
 
-	tgToken := os.Getenv("TELEGRAM_BOT_TOKEN")
-	dcBotToken := os.Getenv("DISCORD_BOT_TOKEN")
+	tgToken := security.LoadSecret("TELEGRAM_BOT_TOKEN")
+	dcBotToken := security.LoadSecret("DISCORD_BOT_TOKEN")
 
 	if tgToken == "" || dcBotToken == "" {
 		log.Fatal("missing required environment variables: TELEGRAM_BOT_TOKEN and/or DISCORD_BOT_TOKEN")

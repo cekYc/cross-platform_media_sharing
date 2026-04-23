@@ -21,6 +21,7 @@ import (
 
 var Session *discordgo.Session
 var adminRoleIDs = map[string]struct{}{}
+var trustedUserIDs = map[string]struct{}{}
 
 type Consumer struct{}
 
@@ -49,7 +50,7 @@ func (c *Consumer) Send(ctx context.Context, event models.MediaEvent) error {
 	// Discord will automatically embed it! This is the best way to stream.
 	// But what if it's a private URL? Telegram direct URLs are public for 1 hour.
 	// So Discord will embed them perfectly!
-	
+
 	// Wait, if it's a file from Telegram, Discord embeds it nicely. Let's do that!
 	// We'll just send the caption and the URL.
 	// If the user wants the file uploaded, we have to download and upload using File.
@@ -92,6 +93,7 @@ func InitBot(token string) {
 	}
 
 	adminRoleIDs = parseRoleIDs(os.Getenv("DISCORD_ADMIN_ROLE_IDS"))
+	trustedUserIDs = parseRoleIDs(os.Getenv("DISCORD_TRUSTED_USER_IDS"))
 
 	Session.AddHandler(handleCommand)
 	Session.AddHandler(handleMessageCreate) // For Producer
@@ -142,6 +144,8 @@ func handleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		handleReplayDeadCommand(s, m, parts)
 	case "!setrule":
 		handleSetRuleCommand(s, m)
+	case "!auditlog":
+		handleAuditLogCommand(s, m, parts)
 	case "!help":
 		handleHelpCommand(s, m.ChannelID)
 	}
@@ -149,7 +153,7 @@ func handleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 func isManagedCommand(command string) bool {
 	switch command {
-	case "!join", "!unlink", "!status", "!help", "!blocklist", "!unblock", "!clearblocks", "!deadletters", "!replaydead", "!setrule":
+	case "!join", "!unlink", "!status", "!help", "!blocklist", "!unblock", "!clearblocks", "!deadletters", "!replaydead", "!setrule", "!auditlog":
 		return true
 	default:
 		return false
@@ -159,6 +163,11 @@ func isManagedCommand(command string) bool {
 func isAuthorizedAdminCommand(s *discordgo.Session, m *discordgo.MessageCreate) bool {
 	if m.GuildID == "" {
 		return false
+	}
+
+	// Check trusted user list first
+	if _, trusted := trustedUserIDs[m.Author.ID]; trusted {
+		return true
 	}
 
 	permissions, err := s.State.UserChannelPermissions(m.Author.ID, m.ChannelID)
@@ -221,6 +230,7 @@ func handleHelpCommand(s *discordgo.Session, channelID string) {
 		"`!deadletters [limit]` - show failed deliveries for this channel\n" +
 		"`!replaydead <dead_letter_id>` - replay one dead-letter item\n" +
 		"`!setrule <telegram_chat_id> <json>` - " + i18n.Get(lang, "help_setrule") + "\n" +
+		"`!auditlog [limit]` - show recent admin action history\n" +
 		"`!help` - show this help"
 	sendChannelMessage(s, channelID, message)
 }
@@ -237,6 +247,8 @@ func handleJoinCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts [
 		log.Println("database error while linking channel:", err)
 		return
 	}
+
+	database.InsertAuditLog("link", "discord", m.Author.ID, fmt.Sprintf("linked telegram:%s to discord:%s", tgID, m.ChannelID))
 
 	sendChannelMessage(s, m.ChannelID, fmt.Sprintf("✅ Linked Telegram chat `%s` to this Discord channel.", tgID))
 }
@@ -258,6 +270,8 @@ func handleUnlinkCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts
 		sendChannelMessage(s, m.ChannelID, fmt.Sprintf("ℹ️ No link found for Telegram chat `%s` in this channel.", tgID))
 		return
 	}
+
+	database.InsertAuditLog("unlink", "discord", m.Author.ID, fmt.Sprintf("unlinked telegram:%s from discord:%s", tgID, m.ChannelID))
 
 	sendChannelMessage(s, m.ChannelID, fmt.Sprintf("✅ Unlinked Telegram chat `%s` from this Discord channel.", tgID))
 }
@@ -372,6 +386,8 @@ func handleUnblockCommand(s *discordgo.Session, m *discordgo.MessageCreate, part
 		return
 	}
 
+	database.InsertAuditLog("unblock", "discord", m.Author.ID, fmt.Sprintf("removed '%s' from %s:%s->discord:%s", word, sourcePlatform, targetTGID, m.ChannelID))
+
 	sendChannelMessage(s, m.ChannelID, fmt.Sprintf("✅ Removed `%s` from block list for `%s`.", word, targetTGID))
 }
 
@@ -402,6 +418,8 @@ func handleClearBlocksCommand(s *discordgo.Session, m *discordgo.MessageCreate, 
 		sendChannelMessage(s, m.ChannelID, "❌ Failed to clear block list.")
 		return
 	}
+
+	database.InsertAuditLog("clearblocks", "discord", m.Author.ID, fmt.Sprintf("cleared blocks for %s:%s->discord:%s", pairing.SourcePlatform, pairing.SourceID, m.ChannelID))
 
 	sendChannelMessage(s, m.ChannelID, fmt.Sprintf("✅ Cleared block list for `%s`.", pairing.SourceID))
 }
@@ -468,8 +486,39 @@ func handleSetRuleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 
 	// Since we only know tgID, we assume platform is telegram.
 	// But it could be anything. We will assume telegram for backwards compat.
-	
+
+	database.InsertAuditLog("setrule", "discord", m.Author.ID, fmt.Sprintf("set rule for %s in discord:%s", parts[1], m.ChannelID))
+
 	sendChannelMessage(s, m.ChannelID, "✅ To set rule, please use CLI command for now, or ensure schema is respected.")
+}
+
+func handleAuditLogCommand(s *discordgo.Session, m *discordgo.MessageCreate, parts []string) {
+	limit := 10
+	if len(parts) > 2 {
+		sendChannelMessage(s, m.ChannelID, "Usage: `!auditlog [limit]`")
+		return
+	}
+	if len(parts) == 2 {
+		parsed, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	entries, err := database.ListAuditLogs(limit)
+	if err != nil || len(entries) == 0 {
+		sendChannelMessage(s, m.ChannelID, "ℹ️ No audit log entries found.")
+		return
+	}
+
+	lines := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		lines = append(lines, fmt.Sprintf("- `%s` by %s:%s — %s (%s)",
+			entry.Action, entry.ActorPlatform, entry.ActorID, entry.Details,
+			entry.CreatedAt.UTC().Format("2006-01-02 15:04")))
+	}
+
+	sendChannelMessage(s, m.ChannelID, "Audit log:\n"+strings.Join(lines, "\n"))
 }
 
 func parseUnblockCommand(pairings []database.Pairing, args []string) (string, string) {
