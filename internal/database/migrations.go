@@ -108,18 +108,30 @@ func v1Init(tx *sql.Tx) error {
 		webhook_secret TEXT DEFAULT '',
 		PRIMARY KEY (source_platform, source_id, target_platform, target_id)
 	)`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	_, err = tx.Exec("CREATE INDEX IF NOT EXISTS idx_pairings_source ON pairings(source_platform, source_id)")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	_, err = tx.Exec("CREATE INDEX IF NOT EXISTS idx_pairings_target ON pairings(target_platform, target_id)")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	// Ensure old columns exist in case this was an old legacy unversioned DB
-	if err := ensureColumnExistsTx(tx, "pairings", "blocked_words", "TEXT DEFAULT ''"); err != nil { return err }
-	if err := ensureColumnExistsTx(tx, "pairings", "rule_config", "TEXT DEFAULT '{}'"); err != nil { return err }
-	if err := ensureColumnExistsTx(tx, "pairings", "webhook_secret", "TEXT DEFAULT ''"); err != nil { return err }
+	if err := ensureColumnExistsTx(tx, "pairings", "blocked_words", "TEXT DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumnExistsTx(tx, "pairings", "rule_config", "TEXT DEFAULT '{}'"); err != nil {
+		return err
+	}
+	if err := ensureColumnExistsTx(tx, "pairings", "webhook_secret", "TEXT DEFAULT ''"); err != nil {
+		return err
+	}
 
 	// 2. Queue Schema
 	queueQueries := []string{
@@ -174,9 +186,13 @@ func v1Init(tx *sql.Tx) error {
 		details TEXT DEFAULT '',
 		created_at INTEGER NOT NULL
 	)`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	_, err = tx.Exec("CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at)")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -192,9 +208,13 @@ func v2NormalizeBlockedWords(tx *sql.Tx) error {
 		word TEXT NOT NULL,
 		PRIMARY KEY (source_platform, source_id, target_platform, target_id, word)
 	)`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	_, err = tx.Exec("CREATE INDEX idx_blocked_words_source ON blocked_words(source_platform, source_id)")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	// 2. Read existing pairings and insert words
 	rows, err := tx.Query("SELECT source_platform, source_id, target_platform, target_id, blocked_words FROM pairings")
@@ -219,7 +239,9 @@ func v2NormalizeBlockedWords(tx *sql.Tx) error {
 	}
 
 	insertStmt, err := tx.Prepare("INSERT OR IGNORE INTO blocked_words (source_platform, source_id, target_platform, target_id, word) VALUES (?, ?, ?, ?, ?)")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer insertStmt.Close()
 
 	for _, p := range pairs {
@@ -234,7 +256,9 @@ func v2NormalizeBlockedWords(tx *sql.Tx) error {
 
 	// 3. Rebuild pairings table without blocked_words
 	_, err = tx.Exec("ALTER TABLE pairings RENAME TO pairings_old")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	_, err = tx.Exec(`CREATE TABLE pairings (
 		source_platform TEXT NOT NULL,
@@ -245,24 +269,38 @@ func v2NormalizeBlockedWords(tx *sql.Tx) error {
 		webhook_secret TEXT DEFAULT '',
 		PRIMARY KEY (source_platform, source_id, target_platform, target_id)
 	)`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	_, err = tx.Exec("DROP INDEX IF EXISTS idx_pairings_source")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	_, err = tx.Exec("CREATE INDEX idx_pairings_source ON pairings(source_platform, source_id)")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	_, err = tx.Exec("DROP INDEX IF EXISTS idx_pairings_target")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	_, err = tx.Exec("CREATE INDEX idx_pairings_target ON pairings(target_platform, target_id)")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	_, err = tx.Exec(`INSERT INTO pairings (source_platform, source_id, target_platform, target_id, rule_config, webhook_secret)
 		SELECT source_platform, source_id, target_platform, target_id, rule_config, webhook_secret FROM pairings_old`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	_, err = tx.Exec("DROP TABLE pairings_old")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -276,21 +314,29 @@ func v3CreateEventHistory(tx *sql.Tx) error {
 		details TEXT DEFAULT '',
 		created_at INTEGER NOT NULL
 	)`)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	_, err = tx.Exec("CREATE INDEX idx_event_history_event_id ON event_history(event_id)")
-	if err != nil { return err }
-	
+	if err != nil {
+		return err
+	}
+
 	// Add index for retention cleanup as requested
 	_, err = tx.Exec("CREATE INDEX idx_event_history_created_at ON event_history(created_at)")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
 
 func ensureColumnExistsTx(tx *sql.Tx, table, column, def string) error {
 	rows, err := tx.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	defer rows.Close()
 
 	hasCol := false
@@ -300,8 +346,12 @@ func ensureColumnExistsTx(tx *sql.Tx, table, column, def string) error {
 		var notnull int
 		var dflt sql.NullString
 		var pk int
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil { return err }
-		if name == column { hasCol = true }
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			hasCol = true
+		}
 	}
 
 	if !hasCol {

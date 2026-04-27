@@ -39,7 +39,7 @@ func Get(lang string, key string) string {
 	if lang == "" {
 		lang = "en"
 	}
-	
+
 	dict, exists := messages[lang]
 	if !exists {
 		dict = messages["en"]

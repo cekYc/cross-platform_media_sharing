@@ -90,7 +90,7 @@ func TestApplyFileRuleDefaults(t *testing.T) {
 
 func TestApplyFileRuleDefaults_ExplicitOverride(t *testing.T) {
 	custom := models.RuleConfig{
-		MaxFileSizeMB:   100,
+		MaxFileSizeMB:    100,
 		AllowedMimeTypes: []string{"image/png"},
 	}
 	result := ApplyFileRuleDefaults(custom)

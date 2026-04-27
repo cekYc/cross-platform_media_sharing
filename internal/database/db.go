@@ -740,10 +740,10 @@ func ReplayDeadLetter(deadLetterID int64, targetPlatform, targetID string) (bool
 	}
 
 	var (
-		eventID    string
-		sp, sid    string
-		tp, tid    string
-		payload    string
+		eventID string
+		sp, sid string
+		tp, tid string
+		payload string
 	)
 
 	err = tx.QueryRow(

@@ -44,7 +44,7 @@ func cleanupTable(tableName, timestampColumn string, cutoff int64, batchSize int
 		if rowsAffected == 0 {
 			break
 		}
-		
+
 		// Small sleep to yield to other database operations
 		time.Sleep(50 * time.Millisecond)
 	}

@@ -478,7 +478,7 @@ func handleSetRuleCommand(s *discordgo.Session, m *discordgo.MessageCreate) {
 		return
 	}
 
-// ...
+	// ...
 	jsonStr := strings.TrimPrefix(parts[2], "```json")
 	jsonStr = strings.TrimPrefix(jsonStr, "```")
 	jsonStr = strings.TrimSuffix(jsonStr, "```")

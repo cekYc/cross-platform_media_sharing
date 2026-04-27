@@ -10,7 +10,7 @@ import (
 	"testing"
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/models"
-	
+
 	_ "modernc.org/sqlite"
 )
 
@@ -21,7 +21,7 @@ func TestWebhookConsumer_Send(t *testing.T) {
 		t.Fatalf("failed to open memory db: %v", err)
 	}
 	defer database.DB.Close()
-	
+
 	_, _ = database.DB.Exec("CREATE TABLE pairings (source_platform TEXT, source_id TEXT, target_platform TEXT, target_id TEXT, blocked_words TEXT, rule_config TEXT, webhook_secret TEXT, PRIMARY KEY(source_platform, source_id, target_platform, target_id))")
 
 	var receivedBody []byte

@@ -10,10 +10,10 @@ import (
 
 // Rate limit configuration loaded from environment at init time.
 var (
-	SourceRateLimitMax     int
-	SourceRateLimitWindow  time.Duration
-	DestRateLimitMax       int
-	DestRateLimitWindow    time.Duration
+	SourceRateLimitMax    int
+	SourceRateLimitWindow time.Duration
+	DestRateLimitMax      int
+	DestRateLimitWindow   time.Duration
 )
 
 func init() {
