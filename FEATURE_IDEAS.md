@@ -156,6 +156,12 @@ This document collects all feature and product ideas for the project in one plac
 
 ## 10) Suggested Delivery Roadmap
 
+Execution status:
+
+- [x] Phase 1
+- [ ] Phase 2
+- [ ] Phase 3
+
 ### Phase 1 (1 week)
 - Admin command expansion
 - Role-based auth
