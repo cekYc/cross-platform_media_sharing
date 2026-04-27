@@ -139,20 +139,20 @@ This document collects all feature and product ideas for the project in one plac
 
 ## 9) Testing and Quality
 
-1. Unit tests
-- Command parsing, rules, retries, queue behavior.
+- [x] 1. Unit tests
+	- [x] Command parsing, rules, retries, queue behavior.
 
-2. Integration tests
-- Telegram/Discord client mocks + DB lifecycle tests.
+- [x] 2. Integration tests
+	- [x] Telegram/Discord client mocks + DB lifecycle tests.
 
-3. Resilience tests
-- Network failures, reconnect storms, and timeout behavior.
+- [x] 3. Resilience tests
+	- [x] Network failures, reconnect storms, and timeout behavior.
 
-4. Performance tests
-- Album bursts, large file scenarios, queue pressure.
+- [x] 4. Performance tests
+	- [x] Album bursts, large file scenarios, queue pressure.
 
-5. CI pipeline
-- go test, race detector, lint, and docker build checks.
+- [x] 5. CI pipeline
+	- [x] go test, race detector, lint, and docker build checks.
 
 ## 10) Suggested Delivery Roadmap
 

@@ -21,6 +21,8 @@ A Go bot that forwards media from Telegram chats to mapped Discord channels.
 - Persistent SQLite-backed delivery queue (survives restarts).
 - Delivery retry with exponential backoff and dead-letter queue.
 - Idempotent event processing via deterministic event IDs.
+- Expanded quality coverage with unit, integration, resilience, and benchmark tests.
+- CI pipeline on GitHub Actions for format check, tests, race detector, vet, and Docker build.
 - Health and readiness endpoints (`/healthz`, `/readyz`).
 - Prometheus-style metrics endpoint (`/metrics`).
 - Structured JSON logs with per-event correlation IDs.
@@ -96,6 +98,30 @@ Notes:
 go test ./...
 go run ./cmd/main.go
 ```
+
+## Testing and Quality
+
+Run full quality checks locally:
+
+```bash
+go test -count=1 ./...
+go test -race -count=1 ./...
+go vet ./...
+```
+
+Run queue-focused resilience tests:
+
+```bash
+go test -count=1 ./internal/queue -run "RetryAndDeadLetter|TimeoutReschedules|DBLifecycle"
+```
+
+Run performance benchmarks (queue burst + large payload formatting):
+
+```bash
+go test -run ^$ -bench "QueueProcessBurst|QueueAlbumBurstProcessing|ApplyFormattingLargePayload" -benchmem ./internal/queue
+```
+
+Continuous Integration workflow: `.github/workflows/ci.yml`.
 
 Observability endpoints (default bind `:8081`):
 
