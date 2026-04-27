@@ -23,4 +23,8 @@ type RuleConfig struct {
 	// 5. Message Formatting and UX
 	CaptionTemplate string `json:"caption_template,omitempty"` // e.g. "From {sender}:\n{caption}"
 	Language        string `json:"language,omitempty"`         // "en" or "tr"
+
+	// 6. Optional AI moderation
+	AIModerationEnabled   bool    `json:"ai_moderation_enabled,omitempty"`
+	AIModerationThreshold float64 `json:"ai_moderation_threshold,omitempty"`
 }

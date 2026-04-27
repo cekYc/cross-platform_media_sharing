@@ -13,8 +13,10 @@ A Go bot that forwards media from Telegram chats to mapped Discord channels.
 - Per-channel block lists and admin command controls.
 - **Advanced Moderation Engine**: Per-channel JSON configuration for regex filtering, sender blocks, and specific file size/MIME rules.
 - **Spam Controls & Time Rules**: Built-in burst limiting and quiet hours (queue content during quiet hours, deliver later).
+- **Optional AI Moderation Layer**: Score NSFW/spam risk before forwarding (disabled by default, threshold-driven).
 - **Rich Message Formatting**: Configurable templates (e.g. `{sender}`, `{caption}`) and automatic Reply mapping blockquotes to preserve context.
 - **Localization & Onboarding**: Multi-language support (EN/TR) for admin commands and guided `/start` onboarding in Telegram.
+- **Optional Web Admin Panel**: Read-only dashboard/API for pairings, queue depth, retry depth, and dead-letter counts.
 - Built-in rate limiting per source chat and destination channel.
 - Audit trail logging to track who modified pairings or configurations.
 - Token masking in logs and support for loading secrets via `_FILE` for enhanced security.
@@ -86,6 +88,13 @@ Optional:
 - `ALERT_QUEUE_DEPTH_THRESHOLD` (default: `500`)
 - `ALERT_RETRY_DEPTH_THRESHOLD` (default: `100`)
 - `ALERT_RECONNECT_STREAK_THRESHOLD` (default: `5`)
+- `AI_MODERATION_ENABLED` (default: `false`)
+- `AI_MODERATION_MIN_SCORE` (default: `0.70`)
+- `AI_MODERATION_KEYWORDS` (comma-separated extra risk keywords)
+- `ADMIN_HTTP_ENABLED` (default: `false`)
+- `ADMIN_HTTP_ADDR` (default: `:8091`)
+- `ADMIN_HTTP_TOKEN` (required when `ADMIN_HTTP_ENABLED=true`)
+- `ADMIN_HTTP_DEFAULT_LIMIT` (default: `100`, max: `500`)
 
 Notes:
 
@@ -128,6 +137,13 @@ Observability endpoints (default bind `:8081`):
 - `GET /healthz`
 - `GET /readyz`
 - `GET /metrics`
+
+Optional admin panel endpoints (default bind `:8091` when enabled):
+
+- `GET /admin/healthz`
+- `GET /admin/` (browser UI)
+- `GET /admin/api/summary` (requires `Authorization: Bearer <ADMIN_HTTP_TOKEN>`)
+- `GET /admin/api/pairings` (requires `Authorization: Bearer <ADMIN_HTTP_TOKEN>`)
 
 ## Run With Docker
 

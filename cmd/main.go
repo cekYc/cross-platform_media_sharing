@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"tg-discord-bot/internal/adminpanel"
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/discord"
 	"tg-discord-bot/internal/observability"
@@ -33,6 +34,7 @@ func main() {
 	defer database.DB.Close()
 
 	observability.Start()
+	adminpanel.Start()
 
 	// Initialize adapters
 	discord.InitBot(dcBotToken)

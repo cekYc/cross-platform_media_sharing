@@ -10,6 +10,7 @@ import (
 
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/models"
+	"tg-discord-bot/internal/moderation"
 	"tg-discord-bot/internal/observability"
 	"tg-discord-bot/internal/security"
 	"tg-discord-bot/internal/transport"
@@ -77,6 +78,11 @@ func StartProcessor() {
 
 func processQueuedEvent(queuedEvent database.QueuedEvent) {
 	event := queuedEvent.Event
+	ruleConfig := models.RuleConfig{}
+
+	if pairing, err := database.GetPairing(event.SourcePlatform, event.SourceID, event.TargetPlatform, event.TargetID); err == nil {
+		ruleConfig = pairing.RuleConfig
+	}
 
 	if strings.TrimSpace(event.TargetID) == "" {
 		handleDeliveryFailure(queuedEvent, "missing target id")
@@ -101,6 +107,24 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 		return
 	}
 
+	moderationDecision := moderation.Evaluate(event, ruleConfig)
+	if moderationDecision.Enabled && moderationDecision.Blocked {
+		observability.RegisterEventFiltered()
+		reasons := ""
+		if len(moderationDecision.Reasons) > 0 {
+			reasons = strings.Join(moderationDecision.Reasons, ",")
+		}
+		database.InsertEventHistory(event.EventID, "filtered", fmt.Sprintf("filtered by ai moderation score %.2f >= %.2f (%s)", moderationDecision.Score, moderationDecision.Threshold, reasons))
+		observability.LogEvent("info", "event filtered by ai moderation", event.EventID, map[string]interface{}{
+			"source_id": event.SourceID,
+			"target_id": event.TargetID,
+			"score":     moderationDecision.Score,
+			"threshold": moderationDecision.Threshold,
+		})
+		ackEvent(event.EventID)
+		return
+	}
+
 	// Destination rate limit check
 	destKey := event.TargetPlatform + ":" + event.TargetID
 	if !security.CheckDestinationRateLimit(destKey) {
@@ -115,10 +139,7 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 		return
 	}
 
-	pairing, err := database.GetPairing(event.SourcePlatform, event.SourceID, event.TargetPlatform, event.TargetID)
-	if err == nil {
-		event = applyFormatting(event, pairing.RuleConfig)
-	}
+	event = applyFormatting(event, ruleConfig)
 
 	consumer, err := transport.GetConsumer(event.TargetPlatform)
 	if err != nil {
@@ -176,7 +197,7 @@ func applyFormatting(event models.MediaEvent, ruleConfig models.RuleConfig) mode
 		if len(replyPreview) > 80 {
 			replyPreview = replyPreview[:77] + "..."
 		}
-		
+
 		blockquote := fmt.Sprintf("> **In reply to %s:**\n> %s\n\n", event.ReplyToSender, replyPreview)
 		caption = blockquote + caption
 	}

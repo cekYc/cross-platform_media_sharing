@@ -74,8 +74,8 @@ This document collects all feature and product ideas for the project in one plac
 - [x] 4. Spam controls
 	- [x] Burst limits and repeated-caption detection.
 
-- [ ] 5. Optional AI moderation layer (Skipped for now)
-	- [ ] NSFW/spam scoring before forwarding.
+- [x] 5. Optional AI moderation layer
+	- [x] NSFW/spam scoring before forwarding.
 
 ## 5) Message Formatting and UX
 
@@ -175,7 +175,7 @@ Execution status:
 - Advanced filter rules
 
 ### Phase 3 (3-5 weeks)
-- Web admin panel (optional, deferred)
+- Web admin panel (optional)
 - Bidirectional mode (optional)
 - Multi-target adapters
 - Full observability + alerts
