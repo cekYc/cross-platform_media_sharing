@@ -159,7 +159,7 @@ This document collects all feature and product ideas for the project in one plac
 Execution status:
 
 - [x] Phase 1
-- [ ] Phase 2
+- [x] Phase 2
 - [ ] Phase 3
 
 ### Phase 1 (1 week)
