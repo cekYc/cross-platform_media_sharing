@@ -44,6 +44,7 @@ func main() {
 
 	// Start generic queue processor
 	go queue.StartProcessor()
+	queue.StartDigestScheduler()
 
 	// Start background retention worker
 	go func() {

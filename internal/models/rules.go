@@ -7,6 +7,7 @@ type RuleConfig struct {
 	BlockedSenders []string `json:"blocked_senders,omitempty"`
 	// Include and exclude precedence (If IncludeWords is not empty, ONLY these are allowed, unless they hit Exclude/Blocked)
 	IncludeWords []string `json:"include_words,omitempty"`
+	RequiredTags []string `json:"required_tags,omitempty"`
 
 	// 2. File rules
 	AllowedMimeTypes []string `json:"allowed_mime_types,omitempty"` // Override global
@@ -23,8 +24,14 @@ type RuleConfig struct {
 	// 5. Message Formatting and UX
 	CaptionTemplate string `json:"caption_template,omitempty"` // e.g. "From {sender}:\n{caption}"
 	Language        string `json:"language,omitempty"`         // "en" or "tr"
+	SimulationMode  bool   `json:"simulation_mode,omitempty"`
 
-	// 6. Optional AI moderation
+	// 6. Digest mode (summaries instead of instant forwarding)
+	DigestEnabled         bool `json:"digest_enabled,omitempty"`
+	DigestIntervalMinutes int  `json:"digest_interval_minutes,omitempty"`
+	DigestMaxItems        int  `json:"digest_max_items,omitempty"`
+
+	// 7. Optional AI moderation
 	AIModerationEnabled   bool    `json:"ai_moderation_enabled,omitempty"`
 	AIModerationThreshold float64 `json:"ai_moderation_threshold,omitempty"`
 }

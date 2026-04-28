@@ -29,6 +29,11 @@ var migrations = []Migration{
 		Name:    "create_event_history",
 		Up:      v3CreateEventHistory,
 	},
+	{
+		Version: 4,
+		Name:    "create_digest_events",
+		Up:      v4CreateDigestEvents,
+	},
 }
 
 // RunMigrations executes all pending migrations in order.
@@ -336,6 +341,36 @@ func v3CreateEventHistory(tx *sql.Tx) error {
 	// Add index for retention cleanup as requested
 	_, err = tx.Exec("CREATE INDEX idx_event_history_created_at ON event_history(created_at)")
 	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func v4CreateDigestEvents(tx *sql.Tx) error {
+	_, err := tx.Exec(`CREATE TABLE IF NOT EXISTS digest_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		source_platform TEXT NOT NULL,
+		source_id TEXT NOT NULL,
+		target_platform TEXT NOT NULL,
+		target_id TEXT NOT NULL,
+		event_id TEXT NOT NULL,
+		caption TEXT DEFAULT '',
+		file_name TEXT DEFAULT '',
+		media_type TEXT DEFAULT '',
+		created_at INTEGER NOT NULL,
+		deliver_after INTEGER NOT NULL,
+		UNIQUE(event_id)
+	)`)
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_digest_events_target ON digest_events(target_platform, target_id)"); err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec("CREATE INDEX IF NOT EXISTS idx_digest_events_deliver_after ON digest_events(deliver_after)"); err != nil {
 		return err
 	}
 

@@ -24,6 +24,11 @@ A Go bot that forwards media from Telegram chats to mapped Discord channels.
 - Delivery retry with exponential backoff and dead-letter queue.
 - Idempotent event processing via deterministic event IDs.
 - Hash-based duplicate media prevention within a configurable time window.
+- Daily digest mode for summary delivery instead of instant forwarding.
+- Tag-based routing with required caption hashtags (for example: #news).
+- Rule simulation mode to dry-run filters without blocking.
+- Per-chat forwarding stats in the admin panel.
+- JSON export/import for pairings and rule configs via CLI.
 - Expanded quality coverage with unit, integration, resilience, and benchmark tests.
 - CI pipeline on GitHub Actions for format check, tests, race detector, vet, and Docker build.
 - Health and readiness endpoints (`/healthz`, `/readyz`).
@@ -58,6 +63,20 @@ Discord commands:
 - `!setrule <telegram_chat_id> <json>`: Set advanced rules (JSON format)
 - `!auditlog [limit]`: Show recent admin action history
 - `!help`: Show command help
+
+## Rule Config (JSON)
+
+Use the `/setrule` or `!setrule` command to apply per-target JSON rules. Example:
+
+```json
+{
+	"required_tags": ["news", "media"],
+	"simulation_mode": true,
+	"digest_enabled": true,
+	"digest_interval_minutes": 1440,
+	"digest_max_items": 20
+}
+```
 
 ## Environment Variables
 
@@ -145,6 +164,21 @@ Optional admin panel endpoints (default bind `:8091` when enabled):
 - `GET /admin/` (browser UI)
 - `GET /admin/api/summary` (requires `Authorization: Bearer <ADMIN_HTTP_TOKEN>`)
 - `GET /admin/api/pairings` (requires `Authorization: Bearer <ADMIN_HTTP_TOKEN>`)
+- `GET /admin/api/chat-stats?source_platform=telegram&source_id=<id>&since_hours=24` (requires `Authorization: Bearer <ADMIN_HTTP_TOKEN>`)
+
+## CLI Export/Import
+
+Export pairings and rule configs:
+
+```bash
+go run cmd/cli/main.go export-pairings -out pairings.json
+```
+
+Import pairings and rule configs:
+
+```bash
+go run cmd/cli/main.go import-pairings -file pairings.json
+```
 
 ## Run With Docker
 
@@ -161,6 +195,7 @@ Stored tables include:
 - Pairings and block lists
 - Pending delivery queue
 - Processed event IDs (idempotency)
+- Digest events (`digest_events` table)
 - Dead-letter deliveries
 - Media dedupe fingerprints (`media_dedupe` table)
 - Audit log (`audit_log` table)

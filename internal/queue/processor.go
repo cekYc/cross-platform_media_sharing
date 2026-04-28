@@ -96,31 +96,54 @@ func processQueuedEvent(queuedEvent database.QueuedEvent) {
 	}
 
 	if containsBlockedWord(event.Caption, blockedWords) {
-		observability.RegisterEventFiltered()
-		observability.LogEvent("info", "event filtered by keyword rules", event.EventID, map[string]interface{}{
-			"source_id": event.SourceID,
-			"target_id": event.TargetID,
-			"file_name": event.FileName,
-		})
-		database.InsertEventHistory(event.EventID, "filtered", "filtered by keyword rules")
-		ackEvent(event.EventID)
-		return
+		if ruleConfig.SimulationMode {
+			recordSimulation(event, "keyword rules")
+		} else {
+			observability.RegisterEventFiltered()
+			observability.LogEvent("info", "event filtered by keyword rules", event.EventID, map[string]interface{}{
+				"source_id": event.SourceID,
+				"target_id": event.TargetID,
+				"file_name": event.FileName,
+			})
+			database.InsertEventHistory(event.EventID, "filtered", "filtered by keyword rules")
+			ackEvent(event.EventID)
+			return
+		}
 	}
 
 	moderationDecision := moderation.Evaluate(event, ruleConfig)
 	if moderationDecision.Enabled && moderationDecision.Blocked {
-		observability.RegisterEventFiltered()
-		reasons := ""
-		if len(moderationDecision.Reasons) > 0 {
-			reasons = strings.Join(moderationDecision.Reasons, ",")
+		if ruleConfig.SimulationMode {
+			recordSimulation(event, "ai moderation")
+		} else {
+			observability.RegisterEventFiltered()
+			reasons := ""
+			if len(moderationDecision.Reasons) > 0 {
+				reasons = strings.Join(moderationDecision.Reasons, ",")
+			}
+			database.InsertEventHistory(event.EventID, "filtered", fmt.Sprintf("filtered by ai moderation score %.2f >= %.2f (%s)", moderationDecision.Score, moderationDecision.Threshold, reasons))
+			observability.LogEvent("info", "event filtered by ai moderation", event.EventID, map[string]interface{}{
+				"source_id": event.SourceID,
+				"target_id": event.TargetID,
+				"score":     moderationDecision.Score,
+				"threshold": moderationDecision.Threshold,
+			})
+			ackEvent(event.EventID)
+			return
 		}
-		database.InsertEventHistory(event.EventID, "filtered", fmt.Sprintf("filtered by ai moderation score %.2f >= %.2f (%s)", moderationDecision.Score, moderationDecision.Threshold, reasons))
-		observability.LogEvent("info", "event filtered by ai moderation", event.EventID, map[string]interface{}{
-			"source_id": event.SourceID,
-			"target_id": event.TargetID,
-			"score":     moderationDecision.Score,
-			"threshold": moderationDecision.Threshold,
-		})
+	}
+
+	if ruleConfig.DigestEnabled {
+		interval := time.Duration(ruleConfig.DigestIntervalMinutes) * time.Minute
+		if interval <= 0 {
+			interval = 24 * time.Hour
+		}
+		deliverAfter := time.Now().Add(interval)
+		if err := database.AddDigestEvent(event, deliverAfter); err != nil {
+			handleDeliveryFailure(queuedEvent, fmt.Sprintf("failed to queue digest: %v", err))
+			return
+		}
+		database.InsertEventHistory(event.EventID, "digested", "queued for digest delivery")
 		ackEvent(event.EventID)
 		return
 	}
@@ -253,4 +276,14 @@ func ackEvent(eventID string) {
 	if err := database.AckPendingEvent(eventID); err != nil {
 		observability.LogEvent("warn", "failed to ack event", eventID, map[string]interface{}{"error": err.Error()})
 	}
+}
+
+func recordSimulation(event models.MediaEvent, rule string) {
+	reason := fmt.Sprintf("simulation mode: %s would block", strings.TrimSpace(rule))
+	observability.LogEvent("info", "simulation: rule would block", event.EventID, map[string]interface{}{
+		"source_id": event.SourceID,
+		"target_id": event.TargetID,
+		"rule":      rule,
+	})
+	_ = database.InsertEventHistory(event.EventID, "simulated_filter", reason)
 }

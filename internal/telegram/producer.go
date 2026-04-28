@@ -119,17 +119,36 @@ func (p *Producer) Start() {
 		var validPairings []database.Pairing
 		for _, pairing := range pairings {
 			if !rules.EvaluateFilterRule(pairing.RuleConfig, update.Message.Caption, senderID) {
+				if pairing.RuleConfig.SimulationMode {
+					recordSimulation(buildEventID(update.Message, fileID, pairing.TargetID), "filter rule blocked", chatStringID, pairing.TargetID)
+					validPairings = append(validPairings, pairing)
+				}
+				continue
+			}
+			if !rules.EvaluateTagRule(pairing.RuleConfig, update.Message.Caption) {
+				if pairing.RuleConfig.SimulationMode {
+					recordSimulation(buildEventID(update.Message, fileID, pairing.TargetID), "required tags missing", chatStringID, pairing.TargetID)
+					validPairings = append(validPairings, pairing)
+				}
 				continue
 			}
 			if !rules.EvaluateSpamRule(pairing.RuleConfig, chatStringID, pairing.TargetID) {
+				if pairing.RuleConfig.SimulationMode {
+					recordSimulation(buildEventID(update.Message, fileID, pairing.TargetID), "spam rule blocked", chatStringID, pairing.TargetID)
+					validPairings = append(validPairings, pairing)
+					continue
+				}
 				observability.Log("info", "message dropped by spam rule", map[string]interface{}{
 					"source_id": chatStringID,
 					"target_id": pairing.TargetID,
 				})
-				// Cannot easily log EventHistory here without eventID, but we drop it silently.
 				continue
 			}
 			if !rules.EvaluateFileRule(pairing.RuleConfig, fileSize, declaredContentType) {
+				if pairing.RuleConfig.SimulationMode {
+					recordSimulation(buildEventID(update.Message, fileID, pairing.TargetID), "file rule blocked", chatStringID, pairing.TargetID)
+					validPairings = append(validPairings, pairing)
+				}
 				continue
 			}
 			validPairings = append(validPairings, pairing)
@@ -226,6 +245,15 @@ func computeRemoteFileHash(fileURL string) (string, error) {
 	}
 
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func recordSimulation(eventID, reason, sourceID, targetID string) {
+	observability.LogEvent("info", "simulation: rule would block", eventID, map[string]interface{}{
+		"source_id": sourceID,
+		"target_id": targetID,
+		"reason":    reason,
+	})
+	_ = database.InsertEventHistory(eventID, "simulated_filter", reason)
 }
 
 func buildEventID(message *tgbotapi.Message, fileID, targetID string) string {

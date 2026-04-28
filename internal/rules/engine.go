@@ -14,6 +14,7 @@ var (
 	mu          sync.Mutex
 	burstCounts = make(map[string]int)
 	burstLast   = make(map[string]time.Time)
+	hashtagRe   = regexp.MustCompile(`#([A-Za-z0-9_]+)`)
 )
 
 // EvaluateFilterRule returns true if the message passes the filter rules.
@@ -49,6 +50,45 @@ func EvaluateFilterRule(config models.RuleConfig, caption string, senderID strin
 	}
 
 	return true
+}
+
+// EvaluateTagRule returns true if the caption satisfies required tag routing.
+func EvaluateTagRule(config models.RuleConfig, caption string) bool {
+	if len(config.RequiredTags) == 0 {
+		return true
+	}
+
+	tags := extractHashtags(caption)
+	if len(tags) == 0 {
+		return false
+	}
+
+	for _, tag := range config.RequiredTags {
+		normalized := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(tag), "#"))
+		if normalized == "" {
+			continue
+		}
+		if _, ok := tags[normalized]; ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+func extractHashtags(caption string) map[string]struct{} {
+	result := map[string]struct{}{}
+	for _, match := range hashtagRe.FindAllStringSubmatch(caption, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		normalized := strings.TrimSpace(strings.ToLower(match[1]))
+		if normalized == "" {
+			continue
+		}
+		result[normalized] = struct{}{}
+	}
+	return result
 }
 
 // EvaluateFileRule returns true if the file satisfies per-chat limitations.

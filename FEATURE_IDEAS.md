@@ -192,8 +192,8 @@ If implementation starts now, the best next 5 are:
 
 ## 12) Nice-to-Have Stretch Ideas
 
-1. Daily digest mode (forward summaries instead of instant forwarding).
-2. Smart routing based on caption tags (for example: #news, #media).
-3. Rule simulation mode (dry-run filters without blocking).
-4. Per-chat dashboards with forwarding statistics.
-5. Export/import pairing and rules in JSON.
+- [x] 1. Daily digest mode (forward summaries instead of instant forwarding).
+- [x] 2. Smart routing based on caption tags (for example: #news, #media).
+- [x] 3. Rule simulation mode (dry-run filters without blocking).
+- [x] 4. Per-chat dashboards with forwarding statistics.
+- [x] 5. Export/import pairing and rules in JSON.

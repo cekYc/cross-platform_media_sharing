@@ -127,6 +127,40 @@ func newMux(cfg panelConfig) *http.ServeMux {
 		})
 	}))
 
+	mux.HandleFunc("/admin/api/chat-stats", withTokenAuth(cfg.token, func(w http.ResponseWriter, r *http.Request) {
+		sourcePlatform := strings.TrimSpace(r.URL.Query().Get("source_platform"))
+		sourceID := strings.TrimSpace(r.URL.Query().Get("source_id"))
+		if sourcePlatform == "" || sourceID == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "source_platform and source_id are required"})
+			return
+		}
+
+		sinceHours := 24
+		if raw := strings.TrimSpace(r.URL.Query().Get("since_hours")); raw != "" {
+			parsed, err := strconv.Atoi(raw)
+			if err == nil && parsed > 0 {
+				if parsed > 168 {
+					parsed = 168
+				}
+				sinceHours = parsed
+			}
+		}
+
+		stats, err := database.GetChatStats(sourcePlatform, sourceID, time.Now().Add(-time.Duration(sinceHours)*time.Hour))
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"source_platform": stats.SourcePlatform,
+			"source_id":       stats.SourceID,
+			"since":           stats.Since.UTC().Format(time.RFC3339),
+			"last_event_at":   stats.LastEventAt.UTC().Format(time.RFC3339),
+			"counts":          stats.Counts,
+		})
+	}))
+
 	return mux
 }
 
@@ -237,6 +271,17 @@ const indexHTML = `<!doctype html>
 
   <div id="summary" class="card">No data loaded yet.</div>
 
+	<div class="card">
+		<h3>Chat Stats</h3>
+		<div class="row">
+			<input id="statsPlatform" placeholder="source platform (telegram/discord)" style="width: 220px;" />
+			<input id="statsSource" placeholder="source id" style="width: 220px;" />
+			<input id="statsHours" placeholder="since hours (default 24)" style="width: 200px;" />
+			<button onclick="loadChatStats()">Load Stats</button>
+		</div>
+		<pre id="chatStats" class="muted">No stats loaded yet.</pre>
+	</div>
+
   <table>
     <thead>
       <tr>
@@ -251,22 +296,26 @@ const indexHTML = `<!doctype html>
   </table>
 
   <script>
-    async function callApi(path) {
+		async function callApi(path) {
       const token = document.getElementById('token').value.trim();
-      const res = await fetch(path, {
+			return await fetch(path, {
         headers: {
           'Authorization': 'Bearer ' + token
         }
       });
-      if (!res.ok) {
-        throw new Error('Request failed: ' + res.status);
-      }
-      return await res.json();
+		}
+
+		async function callJson(path) {
+			const res = await callApi(path);
+			if (!res.ok) {
+				throw new Error('Request failed: ' + res.status);
+			}
+			return await res.json();
     }
 
     async function refreshAll() {
       try {
-        const summary = await callApi('/admin/api/summary');
+		const summary = await callJson('/admin/api/summary');
         document.getElementById('summary').innerText =
           'Pairings: ' + summary.pairings +
           ' | Queue depth: ' + summary.queue_depth +
@@ -274,7 +323,7 @@ const indexHTML = `<!doctype html>
           ' | Dead letters: ' + summary.dead_letters +
           ' | Generated at: ' + summary.generated_at;
 
-        const pairings = await callApi('/admin/api/pairings?limit=200');
+		const pairings = await callJson('/admin/api/pairings?limit=200');
         const tbody = document.getElementById('pairings');
         tbody.innerHTML = '';
         pairings.items.forEach(item => {
@@ -291,6 +340,36 @@ const indexHTML = `<!doctype html>
         alert(err.message + ' (check token and panel availability)');
       }
     }
+
+		async function loadChatStats() {
+			const platform = document.getElementById('statsPlatform').value.trim();
+			const sourceId = document.getElementById('statsSource').value.trim();
+			const sinceHours = document.getElementById('statsHours').value.trim();
+			const output = document.getElementById('chatStats');
+
+			if (!platform || !sourceId) {
+				output.textContent = 'source platform and source id are required';
+				return;
+			}
+
+			let path = '/admin/api/chat-stats?source_platform=' + encodeURIComponent(platform) +
+				'&source_id=' + encodeURIComponent(sourceId);
+			if (sinceHours) {
+				path += '&since_hours=' + encodeURIComponent(sinceHours);
+			}
+
+			try {
+				const res = await callApi(path);
+				const payload = await res.json();
+				if (!res.ok) {
+					output.textContent = payload.error || 'failed to load chat stats';
+					return;
+				}
+				output.textContent = JSON.stringify(payload, null, 2);
+			} catch (err) {
+				output.textContent = err.message;
+			}
+		}
   </script>
 </body>
 </html>`

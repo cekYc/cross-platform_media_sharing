@@ -52,13 +52,34 @@ func handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	for _, attachment := range m.Attachments {
 		var validPairings []database.Pairing
 		for _, pairing := range pairings {
+			eventID := fmt.Sprintf("dc:%s:%s:%s:%s", m.ChannelID, m.ID, attachment.ID, pairing.TargetID)
 			if !rules.EvaluateFilterRule(pairing.RuleConfig, m.Content, m.Author.ID) {
+				if pairing.RuleConfig.SimulationMode {
+					recordSimulation(eventID, "filter rule blocked", sourceID, pairing.TargetID)
+					validPairings = append(validPairings, pairing)
+				}
+				continue
+			}
+			if !rules.EvaluateTagRule(pairing.RuleConfig, m.Content) {
+				if pairing.RuleConfig.SimulationMode {
+					recordSimulation(eventID, "required tags missing", sourceID, pairing.TargetID)
+					validPairings = append(validPairings, pairing)
+				}
 				continue
 			}
 			if !rules.EvaluateSpamRule(pairing.RuleConfig, sourceID, pairing.TargetID) {
+				if pairing.RuleConfig.SimulationMode {
+					recordSimulation(eventID, "spam rule blocked", sourceID, pairing.TargetID)
+					validPairings = append(validPairings, pairing)
+					continue
+				}
 				continue
 			}
 			if !rules.EvaluateFileRule(pairing.RuleConfig, int64(attachment.Size), attachment.ContentType) {
+				if pairing.RuleConfig.SimulationMode {
+					recordSimulation(eventID, "file rule blocked", sourceID, pairing.TargetID)
+					validPairings = append(validPairings, pairing)
+				}
 				continue
 			}
 			validPairings = append(validPairings, pairing)
@@ -110,14 +131,26 @@ func handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// What if there are no attachments but just text? We should forward text!
 	if len(m.Attachments) == 0 && strings.TrimSpace(m.Content) != "" {
 		for _, pairing := range pairings {
+			eventID := fmt.Sprintf("dc:%s:%s:text:%s", m.ChannelID, m.ID, pairing.TargetID)
 			if !rules.EvaluateFilterRule(pairing.RuleConfig, m.Content, m.Author.ID) {
-				continue
+				if pairing.RuleConfig.SimulationMode {
+					recordSimulation(eventID, "filter rule blocked", sourceID, pairing.TargetID)
+				} else {
+					continue
+				}
+			}
+			if !rules.EvaluateTagRule(pairing.RuleConfig, m.Content) {
+				if pairing.RuleConfig.SimulationMode {
+					recordSimulation(eventID, "required tags missing", sourceID, pairing.TargetID)
+				} else {
+					continue
+				}
 			}
 
 			availableAt, _ := rules.EvaluateTimeRule(pairing.RuleConfig, time.Now())
 
 			event := models.MediaEvent{
-				EventID:        fmt.Sprintf("dc:%s:%s:text:%s", m.ChannelID, m.ID, pairing.TargetID),
+				EventID:        eventID,
 				Caption:        m.Content,
 				SourcePlatform: "discord",
 				SourceID:       sourceID,
@@ -161,6 +194,15 @@ func computeRemoteFileHash(fileURL string) (string, error) {
 	}
 
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func recordSimulation(eventID, reason, sourceID, targetID string) {
+	observability.LogEvent("info", "simulation: rule would block", eventID, map[string]interface{}{
+		"source_id": sourceID,
+		"target_id": targetID,
+		"reason":    reason,
+	})
+	_ = database.InsertEventHistory(eventID, "simulated_filter", reason)
 }
 
 func getMediaType(contentType string) string {

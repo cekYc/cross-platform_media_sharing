@@ -107,3 +107,32 @@ func TestSummaryAndPairingsWithToken(t *testing.T) {
 		t.Fatalf("expected blocked_word_count=1, got %d", pairingsPayload.Items[0].BlockedWordCount)
 	}
 }
+
+func TestChatStatsEndpoint(t *testing.T) {
+	setupAdminPanelTestDB(t)
+
+	if err := database.InsertEventHistory("tg:tg-1:1:file:dc-1", "delivered", "ok"); err != nil {
+		t.Fatalf("InsertEventHistory() error = %v", err)
+	}
+
+	mux := newMux(panelConfig{token: "panel-token", defaultLimit: 100})
+	statsReq := httptest.NewRequest(http.MethodGet, "/admin/api/chat-stats?source_platform=telegram&source_id=tg-1", nil)
+	statsReq.Header.Set("Authorization", "Bearer panel-token")
+	statsRes := httptest.NewRecorder()
+	mux.ServeHTTP(statsRes, statsReq)
+
+	if statsRes.Code != http.StatusOK {
+		t.Fatalf("expected chat stats 200, got %d", statsRes.Code)
+	}
+
+	var statsPayload struct {
+		Counts map[string]int `json:"counts"`
+	}
+	if err := json.Unmarshal(statsRes.Body.Bytes(), &statsPayload); err != nil {
+		t.Fatalf("failed to parse stats payload: %v", err)
+	}
+
+	if statsPayload.Counts["delivered"] != 1 {
+		t.Fatalf("expected delivered=1, got %d", statsPayload.Counts["delivered"])
+	}
+}

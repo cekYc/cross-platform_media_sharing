@@ -57,6 +57,22 @@ func TestEvaluateFileRule(t *testing.T) {
 	}
 }
 
+func TestEvaluateTagRule(t *testing.T) {
+	config := models.RuleConfig{RequiredTags: []string{"news", "#media"}}
+
+	if EvaluateTagRule(config, "plain message") {
+		t.Fatal("expected missing tags to fail")
+	}
+
+	if !EvaluateTagRule(config, "update for #News today") {
+		t.Fatal("expected hashtag match to pass")
+	}
+
+	if !EvaluateTagRule(config, "photo drop #media") {
+		t.Fatal("expected second hashtag match to pass")
+	}
+}
+
 func TestEvaluateTimeRule(t *testing.T) {
 	dayRule := models.RuleConfig{
 		QuietHoursStart: "09:00",
