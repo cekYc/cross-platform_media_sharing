@@ -23,6 +23,7 @@ A Go bot that forwards media from Telegram chats to mapped Discord channels.
 - Persistent SQLite-backed delivery queue (survives restarts).
 - Delivery retry with exponential backoff and dead-letter queue.
 - Idempotent event processing via deterministic event IDs.
+- Hash-based duplicate media prevention within a configurable time window.
 - Expanded quality coverage with unit, integration, resilience, and benchmark tests.
 - CI pipeline on GitHub Actions for format check, tests, race detector, vet, and Docker build.
 - Health and readiness endpoints (`/healthz`, `/readyz`).
@@ -161,4 +162,5 @@ Stored tables include:
 - Pending delivery queue
 - Processed event IDs (idempotency)
 - Dead-letter deliveries
+- Media dedupe fingerprints (`media_dedupe` table)
 - Audit log (`audit_log` table)

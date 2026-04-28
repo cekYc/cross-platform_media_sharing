@@ -184,11 +184,11 @@ Execution status:
 
 If implementation starts now, the best next 5 are:
 
-1. Role-based authorization for commands.
-2. /blocklist + /unblock + /clearblocks command set.
-3. Persistent queue and dead-letter table.
-4. Prometheus metrics + /healthz endpoint.
-5. Duplicate media detection by hash.
+- [x] 1. Role-based authorization for commands.
+- [x] 2. /blocklist + /unblock + /clearblocks command set.
+- [x] 3. Persistent queue and dead-letter table.
+- [x] 4. Prometheus metrics + /healthz endpoint.
+- [x] 5. Duplicate media detection by hash.
 
 ## 12) Nice-to-Have Stretch Ideas
 
