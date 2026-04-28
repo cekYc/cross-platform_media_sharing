@@ -19,6 +19,9 @@ func RunRetentionCleanup() {
 	// Delete dead letters older than 14 days
 	cleanupTable("dead_letters", "failed_at", time.Now().Add(-14*24*time.Hour).Unix(), 500)
 
+	// Delete duplicate media fingerprints older than the configured window
+	cleanupTable("media_dedupe", "created_at", time.Now().Add(-duplicateMediaWindow).Unix(), 500)
+
 	// Delete audit logs older than 30 days
 	cleanupTable("audit_log", "created_at", time.Now().Add(-30*24*time.Hour).Unix(), 500)
 

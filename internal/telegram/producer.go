@@ -1,9 +1,12 @@
 package telegram
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"tg-discord-bot/internal/database"
@@ -142,6 +145,11 @@ func (p *Producer) Start() {
 			continue
 		}
 
+		fileHash, err := computeRemoteFileHash(fileURL)
+		if err != nil {
+			observability.Log("warn", "failed to compute telegram media hash", map[string]interface{}{"error": err.Error()})
+		}
+
 		for _, pairing := range validPairings {
 			availableAt, _ := rules.EvaluateTimeRule(pairing.RuleConfig, time.Now())
 
@@ -161,6 +169,7 @@ func (p *Producer) Start() {
 				SenderName:     senderName,
 				ReplyToSender:  replyToSender,
 				ReplyToCaption: replyToCaption,
+				FileHash:       fileHash,
 			}
 
 			enqueued, err := database.EnqueuePendingEvent(event)
@@ -193,6 +202,30 @@ func (p *Producer) Start() {
 			database.InsertEventHistory(event.EventID, "enqueued", "event added to processing queue")
 		}
 	}
+}
+
+func computeRemoteFileHash(fileURL string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, fileURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code when hashing file: %d", resp.StatusCode)
+	}
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, resp.Body); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func buildEventID(message *tgbotapi.Message, fileID, targetID string) string {

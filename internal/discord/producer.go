@@ -1,7 +1,10 @@
 package discord
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"tg-discord-bot/internal/database"
 	"tg-discord-bot/internal/models"
@@ -70,10 +73,19 @@ func handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 		for _, pairing := range validPairings {
 			availableAt, _ := rules.EvaluateTimeRule(pairing.RuleConfig, time.Now())
 
+			fileHash, err := computeRemoteFileHash(attachment.URL)
+			if err != nil {
+				observability.Log("warn", "failed to compute discord media hash", map[string]interface{}{
+					"error":      err.Error(),
+					"attachment": attachment.ID,
+				})
+			}
+
 			event := models.MediaEvent{
 				EventID:        fmt.Sprintf("dc:%s:%s:%s:%s", m.ChannelID, m.ID, attachment.ID, pairing.TargetID),
 				FileURL:        attachment.URL, // Direct URL to the attachment!
 				FileName:       attachment.Filename,
+				FileHash:       fileHash,
 				Caption:        m.Content,
 				SourcePlatform: "discord",
 				SourceID:       sourceID,
@@ -125,6 +137,30 @@ func handleMessageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 			}
 		}
 	}
+}
+
+func computeRemoteFileHash(fileURL string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, fileURL, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code when hashing file: %d", resp.StatusCode)
+	}
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, resp.Body); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func getMediaType(contentType string) string {

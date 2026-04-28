@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -52,6 +54,8 @@ type AuditEntry struct {
 }
 
 var DB *sql.DB
+
+var duplicateMediaWindow = time.Duration(parseIntEnvDefault("DUPLICATE_WINDOW_SECONDS", 600)) * time.Second
 
 func InitDB() {
 	var err error
@@ -452,6 +456,18 @@ func EnqueuePendingEvent(event models.MediaEvent) (bool, error) {
 		return false, err
 	}
 
+	if event.FileHash != "" {
+		duplicate, err := recordMediaDedupe(tx, event, now)
+		if err != nil {
+			rollback()
+			return false, err
+		}
+		if !duplicate {
+			rollback()
+			return false, nil
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
@@ -462,6 +478,62 @@ func EnqueuePendingEvent(event models.MediaEvent) (bool, error) {
 	}
 
 	return rowsAffected > 0, nil
+}
+
+func recordMediaDedupe(tx *sql.Tx, event models.MediaEvent, now int64) (bool, error) {
+	if strings.TrimSpace(event.FileHash) == "" {
+		return true, nil
+	}
+
+	cutoff := now - int64(duplicateMediaWindow.Seconds())
+	if cutoff < 0 {
+		cutoff = 0
+	}
+
+	if _, err := tx.Exec("DELETE FROM media_dedupe WHERE created_at < ?", cutoff); err != nil {
+		return false, err
+	}
+
+	result, err := tx.Exec(
+		`INSERT INTO media_dedupe (
+			source_platform,
+			source_id,
+			target_platform,
+			target_id,
+			file_hash,
+			created_at
+		) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(source_platform, source_id, target_platform, target_id, file_hash) DO NOTHING`,
+		event.SourcePlatform,
+		event.SourceID,
+		event.TargetPlatform,
+		event.TargetID,
+		event.FileHash,
+		now,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+
+	return rowsAffected > 0, nil
+}
+
+func parseIntEnvDefault(name string, defaultVal int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return defaultVal
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return defaultVal
+	}
+
+	return value
 }
 
 func ClaimNextPendingEvent(now time.Time, lease time.Duration) (QueuedEvent, bool, error) {

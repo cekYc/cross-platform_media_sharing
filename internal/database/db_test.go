@@ -99,6 +99,53 @@ func TestPersistentQueueEnqueueClaimAckIdempotent(t *testing.T) {
 	}
 }
 
+func TestMediaHashDuplicatePrevention(t *testing.T) {
+	setupQueueTestDB(t)
+
+	first := models.MediaEvent{
+		EventID:        "evt-media-1",
+		SourcePlatform: "telegram",
+		SourceID:       "tg-1",
+		TargetPlatform: "discord",
+		TargetID:       "dc-1",
+		FileName:       "photo.jpg",
+		FileURL:        "http://example.com/photo.jpg",
+		FileHash:       "hash-shared",
+	}
+
+	enqueued, err := EnqueuePendingEvent(first)
+	if err != nil {
+		t.Fatalf("EnqueuePendingEvent() first error = %v", err)
+	}
+	if !enqueued {
+		t.Fatal("expected first media event to enqueue")
+	}
+
+	second := first
+	second.EventID = "evt-media-2"
+	second.FileURL = "http://example.com/photo-copy.jpg"
+
+	enqueued, err = EnqueuePendingEvent(second)
+	if err != nil {
+		t.Fatalf("EnqueuePendingEvent() duplicate media error = %v", err)
+	}
+	if enqueued {
+		t.Fatal("expected duplicate media hash to be ignored")
+	}
+
+	third := first
+	third.EventID = "evt-media-3"
+	third.FileHash = "hash-unique"
+
+	enqueued, err = EnqueuePendingEvent(third)
+	if err != nil {
+		t.Fatalf("EnqueuePendingEvent() unique media error = %v", err)
+	}
+	if !enqueued {
+		t.Fatal("expected unique media hash to enqueue")
+	}
+}
+
 func TestDeadLetterReplayFlow(t *testing.T) {
 	setupQueueTestDB(t)
 

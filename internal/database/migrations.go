@@ -170,6 +170,16 @@ func v1Init(tx *sql.Tx) error {
 		)`,
 		"CREATE INDEX IF NOT EXISTS idx_dead_letters_target ON dead_letters(target_platform, target_id)",
 		"CREATE INDEX IF NOT EXISTS idx_dead_letters_failed_at ON dead_letters(failed_at)",
+		`CREATE TABLE IF NOT EXISTS media_dedupe (
+			source_platform TEXT NOT NULL,
+			source_id TEXT NOT NULL,
+			target_platform TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			file_hash TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (source_platform, source_id, target_platform, target_id, file_hash)
+		)`,
+		"CREATE INDEX IF NOT EXISTS idx_media_dedupe_created_at ON media_dedupe(created_at)",
 	}
 	for _, query := range queueQueries {
 		if _, err := tx.Exec(query); err != nil {

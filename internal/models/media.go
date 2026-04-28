@@ -10,6 +10,7 @@ const (
 type MediaEvent struct {
 	EventID        string
 	FileName       string
+	FileHash       string
 	Caption        string
 	SourcePlatform string
 	SourceID       string
